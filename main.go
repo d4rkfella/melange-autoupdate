@@ -217,7 +217,7 @@ func main() {
 
 	if !config.Update.Enabled {
 		log.Printf("Updates are disabled for package %s, skipping.", config.Package.Name)
-		writeOutput("", "", "", "", false)
+		writeOutput("", "", false)
 		return
 	}
 
@@ -249,7 +249,7 @@ func main() {
 
 	if compareVersions(versionToUse, config.Package.Version) <= 0 {
 		fmt.Println("Already up to date.")
-		writeOutput("", "", "", "", false)
+		writeOutput("", "", false)
 		return
 	}
 
@@ -288,7 +288,7 @@ func main() {
 	if err != nil {
 		log.Printf("Failed to generate PR Body: %v", err)
 	}
-	writeOutput(config.Package.Version, versionToUse, config.Package.Name, filePath, true)
+	writeOutput(versionToUse, config.Package.Name, true)
 }
 
 func parseGitHubRepo(repoURL string) (owner, repo string, err error) {
@@ -692,21 +692,17 @@ func isNumeric(s string) bool {
 	return err == nil
 }
 
-func writeOutput(currentVersion, newVersion, packageName, filePath string, bumped bool) {
+func writeOutput(newVersion, packageName string, bumped bool) {
 	outputPath := "output.json"
 
 	result := struct {
-		Bumped         bool   `json:"bumped"`
-		PackageName    string `json:"package_name"`
-		CurrentVersion string `json:"current_version"`
-		NewVersion     string `json:"new_version"`
-		FilePath       string `json:"file_path"`
+		Bumped      bool   `json:"bumped"`
+		PackageName string `json:"package_name"`
+		NewVersion  string `json:"new_version"`
 	}{
-		Bumped:         bumped,
-		PackageName:    packageName,
-		CurrentVersion: currentVersion,
-		NewVersion:     newVersion,
-		FilePath:       filePath,
+		Bumped:      bumped,
+		PackageName: packageName,
+		NewVersion:  newVersion,
 	}
 
 	data, err := json.Marshal(result)
