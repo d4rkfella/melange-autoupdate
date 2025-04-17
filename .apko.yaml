@@ -4,7 +4,6 @@ contents:
   repositories:
     - https://packages.wolfi.dev/os
   packages:
-    - wolfi-baselayout
     - melange-autoupdate
     - melange
 accounts:
