@@ -627,7 +627,7 @@ func naturalCompare(a, b string) int {
 func addGitHubHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", "melange-updater/1.0")
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "token "+token)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 }
 
