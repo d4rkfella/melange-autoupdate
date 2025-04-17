@@ -217,7 +217,7 @@ func main() {
 
 	if !config.Update.Enabled {
 		log.Printf("Updates are disabled for package %s, skipping.", config.Package.Name)
-		writeOutput("", "", "", "", "", false)
+		writeOutput("", "", "", "", false)
 		return
 	}
 
@@ -247,10 +247,9 @@ func main() {
 		log.Fatalf("ERROR: Version format mismatch.\nProcessed latest version: %q\nCurrent package version: %q\nPlease review your version processing rules.", versionToUse, config.Package.Version)
 	}
 
-	outputPath := "output.json"
 	if compareVersions(versionToUse, config.Package.Version) <= 0 {
 		fmt.Println("Already up to date.")
-		writeOutput("", "", "", "", "", false)
+		writeOutput("", "", "", "", false)
 		return
 	}
 
@@ -289,7 +288,7 @@ func main() {
 	if err != nil {
 		log.Printf("Failed to generate PR Body: %v", err)
 	}
-	writeOutput(outputPath, config.Package.Version, versionToUse, config.Package.Name, filePath, true)
+	writeOutput(config.Package.Version, versionToUse, config.Package.Name, filePath, true)
 }
 
 func parseGitHubRepo(repoURL string) (owner, repo string, err error) {
@@ -406,7 +405,7 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 	}
 	owner, repo := parts[0], parts[1]
 
-	skipPreReleases := strings.ToLower(os.Getenv("SKIP_PRERELEASES")) == "true"
+	skipPreReleases := strings.ToLower(os.Getenv("SKIP_PRERELEASES")) != "false"
 	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/", owner, repo)
 
 	var tagNames []string
@@ -693,7 +692,9 @@ func isNumeric(s string) bool {
 	return err == nil
 }
 
-func writeOutput(outPath, currentVersion, newVersion, packageName, filePath string, bumped bool) {
+func writeOutput(currentVersion, newVersion, packageName, filePath string, bumped bool) {
+	outputPath := "output.json"
+
 	result := struct {
 		Bumped         bool   `json:"bumped"`
 		PackageName    string `json:"package_name"`
@@ -712,7 +713,7 @@ func writeOutput(outPath, currentVersion, newVersion, packageName, filePath stri
 	if err != nil {
 		log.Fatalf("Failed to marshal bump result: %v", err)
 	}
-	err = os.WriteFile(outPath, data, 0644)
+	err = os.WriteFile(outputPath, data, 0644)
 	if err != nil {
 		log.Fatalf("Failed to write bump output file: %v", err)
 	}
