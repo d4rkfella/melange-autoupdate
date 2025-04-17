@@ -9,15 +9,15 @@ contents:
     - melange
 accounts:
   groups:
-    - groupname: nonroot
-      gid: 65532
+    - groupname: runner
+      gid: 1000
   users:
-    - username: nonroot
-      uid: 65532
-      gid: 65532
+    - username: runner
+      uid: 1000
+      gid: 1000
       homedir: ""
       shell: ""
-  run-as: nonroot:nonroot
+  run-as: runner:runner
 environment:
   PATH: /bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
