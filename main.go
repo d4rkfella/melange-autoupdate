@@ -217,6 +217,7 @@ func main() {
 
 	if !config.Update.Enabled {
 		log.Printf("Updates are disabled for package %s, skipping.", config.Package.Name)
+		writeOutput("", "", "", "", "", false)
 		return
 	}
 
@@ -249,7 +250,7 @@ func main() {
 	outputPath := "output.json"
 	if compareVersions(versionToUse, config.Package.Version) <= 0 {
 		fmt.Println("Already up to date.")
-		writeOutput(outputPath, config.Package.Version, versionToUse, config.Package.Name, filePath, true)
+		writeOutput("", "", "", "", "", false)
 		return
 	}
 
