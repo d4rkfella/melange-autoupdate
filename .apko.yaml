@@ -10,6 +10,8 @@ contents:
     - bash
     - gcc
     - melange-autoupdate
+    - yq
+    - jq
 environment:
   PATH: /bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
