@@ -12,6 +12,8 @@ contents:
     - melange-autoupdate
     - yq
     - jq
+    - curl
+    - aws-cli-2
 environment:
   PATH: /bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
