@@ -5,7 +5,10 @@ contents:
     - https://packages.wolfi.dev/os
   packages:
     - wolfi-base
+    - wolfi-baselayout
+    - git
     - bash
+    - gcc
     - melange-autoupdate
 environment:
   PATH: /bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
