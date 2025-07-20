@@ -755,7 +755,7 @@ func ReconstructPackageVersion(config *Config) string {
 }
 
 func GeneratePRBody(owner, repo, oldVersion, newVersion, packageName string) error {
-	prBody := fmt.Sprintf("### 📦 Automated Package Update\n\n")
+	prBody := "### 📦 Automated Package Update\n\n"
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
 	prBody += fmt.Sprintf("**Change:** %s → %s\n", oldVersion, newVersion)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
