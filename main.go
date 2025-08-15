@@ -174,6 +174,7 @@ type GitHub struct {
 	UseTag            bool   `yaml:"use-tag,omitempty"`
 	TagFilterPrefix   string `yaml:"tag-filter-prefix,omitempty"`
 	TagFilterContains string `yaml:"tag-filter-contains,omitempty"`
+	SkipPreRelease    bool   `yaml:"skip-prerelease",omitempty"`
 }
 
 type Git struct {
@@ -405,7 +406,10 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 	}
 	owner, repo := parts[0], parts[1]
 
-	skipPreReleases := strings.ToLower(os.Getenv("SKIP_PRERELEASES")) != "false"
+	skipPreReleases := true
+	if update.GitHub != nil {
+	    skipPreReleases = update.GitHub.SkipPreRelease
+	}
 	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/", owner, repo)
 
 	var tagNames []string
