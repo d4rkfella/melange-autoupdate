@@ -174,7 +174,7 @@ type GitHub struct {
 	UseTag            bool   `yaml:"use-tag,omitempty"`
 	TagFilterPrefix   string `yaml:"tag-filter-prefix,omitempty"`
 	TagFilterContains string `yaml:"tag-filter-contains,omitempty"`
-	SkipPreRelease    bool   `yaml:"skip-prerelease",omitempty"`
+	SkipPreRelease    bool   `yaml:"skip-prerelease,omitempty"`
 }
 
 type Git struct {
