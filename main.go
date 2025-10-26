@@ -253,6 +253,19 @@ func main() {
 		return
 	}
 
+	if config.Package.Epoch != 0 {
+		log.Printf("INFO: Version bump detected — resetting epoch from %d to 0", config.Package.Epoch)
+		config.Package.Epoch = 0
+
+		outData, err := yaml.Marshal(&config)
+		if err != nil {
+			log.Fatalf("Failed to marshal updated config: %v", err)
+		}
+		if err := os.WriteFile(filePath, outData, 0644); err != nil {
+			log.Fatalf("Failed to write updated config with reset epoch: %v", err)
+		}
+	}
+
 	var (
 		expectedCommitNeeded bool
 		repoURL              string
