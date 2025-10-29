@@ -197,7 +197,7 @@ var httpClient = &http.Client{
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("Please provide a Melange config file path")
+		log.Fatal("ERROR: please provide a valid Melange config file path")
 	}
 	filePath := os.Args[1]
 	data, err := os.ReadFile(filePath)
@@ -207,11 +207,11 @@ func main() {
 
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
-		log.Fatalf("failed to unmarshal config: %v", err)
+		log.Fatalf("ERROR: failed to unmarshal Melange yaml config: %v", err)
 	}
 
 	if err := config.Validate(); err != nil {
-		log.Fatalf("invalid config: %v", err)
+		log.Fatalf("ERROR: invalid Melange yaml config: %v", err)
 	}
 	log.Printf("Parsed update config: %+v", config.Update)
 
@@ -227,7 +227,7 @@ func main() {
 	} else if config.Update.GitHub != nil {
 		versionResult, err = getLatestGitHubVersion(&config.Update)
 	} else {
-		log.Fatal("No update provider configured")
+		log.Fatal("ERROR: update provider not configured")
 	}
 	if err != nil {
 		log.Fatal(err)
@@ -237,32 +237,30 @@ func main() {
 	if len(config.Update.VersionTransforms) > 0 {
 		transformedVersion := applyVersionTransforms(versionResult.Processed, config.Update.VersionTransforms)
 		versionToUse = transformedVersion
-		log.Printf("INFO: Transformed version: %s", versionToUse)
 	} else {
 		versionToUse = versionResult.Processed
-		log.Printf("INFO: No version transformation rules defined. Using processed version: %s", versionToUse)
 	}
 
 	if !isStrictSameFormat(versionToUse, config.Package.Version) {
-		log.Fatalf("ERROR: Version format mismatch.\nProcessed latest version: %q\nCurrent package version: %q\nPlease review your version processing rules.", versionToUse, config.Package.Version)
+		log.Fatalf("ERROR: Version format mismatch during comparison.\nFetched latest version: %q\nCurrent package version: %q\nPlease review your version transform rules.", versionToUse, config.Package.Version)
 	}
 
 	if compareVersions(versionToUse, config.Package.Version) <= 0 {
-		fmt.Println("Already up to date.")
+		log.Printf("INFO: package version already up to date.")
 		writeOutput("", "", false)
 		return
 	}
 
 	if config.Package.Epoch != 0 {
-		log.Printf("INFO: Version bump detected — resetting epoch from %d to 0", config.Package.Epoch)
+		log.Print("INFO: Reseting epoch config value to 0")
 		config.Package.Epoch = 0
-
+	
 		outData, err := yaml.Marshal(&config)
 		if err != nil {
-			log.Fatalf("Failed to marshal updated config: %v", err)
+			log.Fatalf("ERROR: Failed to serialize the updated Melange config to YAML: %v", err)
 		}
 		if err := os.WriteFile(filePath, outData, 0644); err != nil {
-			log.Fatalf("Failed to write updated config with reset epoch: %v", err)
+			log.Fatalf("ERROR: Failed to write updated Melange config to %s: %v", filePath, err)
 		}
 	}
 
@@ -299,7 +297,7 @@ func main() {
 	newVersion := versionResult.Original
 	err = GeneratePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
 	if err != nil {
-		log.Printf("Failed to generate PR Body: %v", err)
+		log.Fatalf("Failed to generate PR Body: %v", err)
 	}
 	writeOutput(versionToUse, config.Package.Name, true)
 }
@@ -418,9 +416,15 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 	}
 	owner, repo := parts[0], parts[1]
 
-	skipPreReleases := strings.ToLower(os.Getenv("SKIP_PRERELEASES")) != "false"
-	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/", owner, repo)
+	includePreReleases := false
+	if envSkip := os.Getenv("SKIP_PRERELEASES"); envSkip != "" {
+		includePreReleases = strings.ToLower(envSkip) == "false"
+	}
+	if update.GitHub != nil && update.GitHub.PreReleases != nil {
+		includePreReleases = *update.GitHub.PreReleases
+	}
 
+	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/", owner, repo)
 	var tagNames []string
 	page := 1
 
@@ -481,7 +485,7 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 				break
 			}
 			for _, r := range pageResults {
-				if skipPreReleases && r.Prerelease {
+				if !includePreReleases && r.Prerelease {
 					log.Printf("INFO skipping pre-release: %s", r.TagName)
 					continue
 				}
@@ -500,7 +504,7 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 		gh.TagFilterContains,
 	)
 	if len(filtered) == 0 {
-		return VersionResult{}, fmt.Errorf("no valid versions found")
+		return VersionResult{}, fmt.Errorf("no valid versions found after applying filtering")
 	}
 
 	all := make([]sortableVersion, 0, len(filtered))
@@ -551,7 +555,7 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 	})
 
 	picked := all[len(all)-1]
-	log.Printf("INFO selected latest version: %s (from original %s)", picked.Processed, picked.Original)
+	log.Printf("INFO selected latest version: %s", picked.Original)
 
 	return VersionResult{
 		Original:  picked.Original,
@@ -705,31 +709,33 @@ func isNumeric(s string) bool {
 	return err == nil
 }
 
-func writeOutput(newVersion, packageName string, bumped bool) {
+func writeOutput(newVersion, packageName string, bumped bool, preRelease bool) {
 	outputPath := "output.json"
 
-	result := struct {
+	update_info := struct {
 		Bumped      bool   `json:"bumped"`
 		PackageName string `json:"package_name"`
 		NewVersion  string `json:"new_version"`
+		PreRelease  bool   `json:"pre_release"`
 	}{
 		Bumped:      bumped,
 		PackageName: packageName,
 		NewVersion:  newVersion,
+		PreRelease:  preRelease,
 	}
 
-	data, err := json.Marshal(result)
+	data, err := json.MarshalIndent(update_info, "", "  ")
 	if err != nil {
-		log.Fatalf("Failed to marshal bump result: %v", err)
+		log.Fatalf("ERROR: Failed to serialize version update info: %v", err)
 	}
-	err = os.WriteFile(outputPath, data, 0644)
-	if err != nil {
-		log.Fatalf("Failed to write bump output file: %v", err)
+
+	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+		log.Fatalf("ERROR: Failed to write version update output file to %s: %v", outputPath, err)
 	}
 }
 
 func ReconstructPackageVersion(config *Config) string {
-	originalVersion := config.Package.Version
+	version := config.Package.Version
 
 	var filterVarTransforms []VarTransform
 	for _, transform := range config.VarTransforms {
@@ -738,33 +744,52 @@ func ReconstructPackageVersion(config *Config) string {
 		}
 	}
 
-	if len(filterVarTransforms) > 0 {
-		for _, transform := range filterVarTransforms {
-			if transform.compiled.MatchString(originalVersion) {
-				originalVersion = transform.compiled.ReplaceAllString(originalVersion, transform.Replace)
+	tagUsesTransform := map[string]bool{}
+	for _, step := range config.Pipeline {
+		if step.Uses == "git-checkout" {
+			if tag, ok := step.With["tag"].(string); ok {
+				for _, transform := range filterVarTransforms {
+					placeholder := fmt.Sprintf("${{vars.%s}}", transform.To)
+					if strings.Contains(tag, placeholder) {
+						tagUsesTransform[transform.To] = true
+					}
+				}
 			}
+		}
+	}
+
+	for _, transform := range filterVarTransforms {
+		if !tagUsesTransform[transform.To] {
+			log.Printf("INFO skipping var transform '%s' — not used in git-checkout step", transform.To)
+			continue
+		}
+
+		if transform.compiled.MatchString(currentVersion) {
+			transformedVersion := transform.compiled.ReplaceAllString(version, transform.Replace)
+			log.Printf("INFO applied transform '%s': %s -> %s", transform.To, currentVersion, transformedVersion)
+			version = transformedVersion
 		}
 	}
 
 	if config.Update.GitHub != nil {
 		if config.Update.GitHub.StripPrefix != "" {
-			originalVersion = config.Update.GitHub.StripPrefix + originalVersion
+			version = config.Update.GitHub.StripPrefix + version
 		}
 		if config.Update.GitHub.StripSuffix != "" {
-			originalVersion = originalVersion + config.Update.GitHub.StripSuffix
+			version = version + config.Update.GitHub.StripSuffix
 		}
 	}
 
 	if config.Update.ReleaseMonitor != nil {
 		if config.Update.ReleaseMonitor.StripPrefix != "" {
-			originalVersion = config.Update.ReleaseMonitor.StripPrefix + originalVersion
+			version = config.Update.ReleaseMonitor.StripPrefix + version
 		}
 		if config.Update.ReleaseMonitor.StripSuffix != "" {
-			originalVersion = originalVersion + config.Update.ReleaseMonitor.StripSuffix
+			version = version + config.Update.ReleaseMonitor.StripSuffix
 		}
 	}
 
-	return originalVersion
+	return version
 }
 
 func GeneratePRBody(owner, repo, oldVersion, newVersion, packageName string) error {
