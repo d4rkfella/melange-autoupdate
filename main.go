@@ -706,19 +706,17 @@ func isNumeric(s string) bool {
 	return err == nil
 }
 
-func writeOutput(newVersion, packageName string, bumped bool, preRelease bool) {
+func writeOutput(newVersion, packageName string, bumped bool) {
 	outputPath := "output.json"
 
 	update_info := struct {
 		Bumped      bool   `json:"bumped"`
 		PackageName string `json:"package_name"`
 		NewVersion  string `json:"new_version"`
-		PreRelease  bool   `json:"pre_release"`
 	}{
 		Bumped:      bumped,
 		PackageName: packageName,
 		NewVersion:  newVersion,
-		PreRelease:  preRelease,
 	}
 
 	data, err := json.MarshalIndent(update_info, "", "  ")
@@ -761,7 +759,7 @@ func ReconstructPackageVersion(config *Config) string {
 			continue
 		}
 
-		if transform.compiled.MatchString(currentVersion) {
+		if transform.compiled.MatchString(version) {
 			transformedVersion := transform.compiled.ReplaceAllString(version, transform.Replace)
 			log.Printf("INFO applied transform '%s': %s -> %s", transform.To, version, transformedVersion)
 			version = transformedVersion
