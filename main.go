@@ -787,7 +787,6 @@ func ReconstructPackageVersion(config *Config) string {
 func generatePRBody(owner, repo, oldVersion, newVersion, packageName string) {
 	prBody := "### 📦 Automated Package Update\n\n"
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
-	prBody += fmt.Sprintf("**Change:** %s → %s\n", oldVersion, newVersion)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
 
 	compareURL, releaseNotes := GenerateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
