@@ -824,7 +824,8 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 	resp, err := http.Get(apiURL)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		log.Print("WARNING: failed to fetch release notes from GitHub, falling back to compare URL")
-		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), nil, nil
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return &compare, nil, nil
 	}
 	defer resp.Body.Close()
 
@@ -834,15 +835,18 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		log.Printf("WARNING: failed to decode release body: %w", err)
 		log.Print("INFO: falling back to compare URL")
-		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), nil, nil
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return &compare, nil, nil
 	}
 
 	if strings.TrimSpace(release.Body) == "" {
 		log.Print("No release notes found, falling back to compare URL")
-		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), nil, nil
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return &compare, nil, nil
 	}
 
-	return nil, release.Body, nil
+	releaseBody := release.Body
+	return nil, &releaseBody, nil
 }
 
 func runMelangeCommand(config Config, filePath, versionToUse, originalVersion, owner, repo string, expectedCommitNeeded bool) error {
