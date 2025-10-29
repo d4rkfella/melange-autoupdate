@@ -819,7 +819,7 @@ func GeneratePRBody(owner, repo, oldVersion, newVersion, packageName string) err
 	return nil
 }
 
-func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (string, string, error) {
+func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (*string, *string, error)
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, newVersion)
 	resp, err := http.Get(apiURL)
 	if err != nil || resp.StatusCode != http.StatusOK {
