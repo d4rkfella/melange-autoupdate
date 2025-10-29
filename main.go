@@ -420,9 +420,6 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 	if envSkip := os.Getenv("SKIP_PRERELEASES"); envSkip != "" {
 		includePreReleases = strings.ToLower(envSkip) == "false"
 	}
-	if update.GitHub != nil && update.GitHub.PreReleases != nil {
-		includePreReleases = *update.GitHub.PreReleases
-	}
 
 	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/", owner, repo)
 	var tagNames []string
