@@ -299,7 +299,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to generate PR Body: %v", err)
 	}
-	writeOutput(versionToUse, config.Package.Name, true)
+	writeOutput(newVersion, config.Package.Name, true)
 }
 
 func parseGitHubRepo(repoURL string) (owner, repo string, err error) {
@@ -819,7 +819,7 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, newVersion)
 	resp, err := http.Get(apiURL)
 	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Printf("Could not fetch release notes from GitHub, falling back to compare URL")
+		log.Print("Could not fetch release notes from GitHub, falling back to compare URL")
 		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), "", nil
 	}
 	defer resp.Body.Close()
@@ -832,7 +832,7 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 	}
 
 	if strings.TrimSpace(release.Body) == "" {
-		log.Printf("No release notes found, falling back to compare URL")
+		log.Print("No release notes found, falling back to compare URL")
 		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), "", nil
 	}
 
