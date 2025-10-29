@@ -295,10 +295,7 @@ func main() {
 
 	currentVersion := ReconstructPackageVersion(&config)
 	newVersion := versionResult.Original
-	err = GeneratePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
-	if err != nil {
-		log.Fatalf("Failed to generate PR Body: %v", err)
-	}
+	generatePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
 	writeOutput(newVersion, config.Package.Name, true)
 }
 
@@ -787,16 +784,13 @@ func ReconstructPackageVersion(config *Config) string {
 	return version
 }
 
-func GeneratePRBody(owner, repo, oldVersion, newVersion, packageName string) error {
+func generatePRBody(owner, repo, oldVersion, newVersion, packageName string) {
 	prBody := "### 📦 Automated Package Update\n\n"
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
 	prBody += fmt.Sprintf("**Change:** %s → %s\n", oldVersion, newVersion)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
 
-	compareURL, releaseNotes, err := GenerateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
-	if err != nil {
-		return fmt.Errorf("failed to generate release notes or compare URL: %w", err)
-	}
+	compareURL, releaseNotes := GenerateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
 
 	if releaseNotes != nil {
 		prBody += fmt.Sprintf(
@@ -814,19 +808,17 @@ func GeneratePRBody(owner, repo, oldVersion, newVersion, packageName string) err
 	prBodyPath := "pr_body.md"
 	err = os.WriteFile(prBodyPath, []byte(prBody), 0644)
 	if err != nil {
-		return fmt.Errorf("failed to write PR body file: %w", err)
+		log.Fatalf("failed to write PR body file: %w", err)
 	}
-
-	return nil
 }
 
-func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (*string, *string, error) {
+func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (*string, *string) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, newVersion)
 	resp, err := http.Get(apiURL)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		log.Print("WARNING: failed to fetch release notes from GitHub, falling back to compare URL")
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return &compare, nil, nil
+		return &compare, nil
 	}
 	defer resp.Body.Close()
 
@@ -834,20 +826,20 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 		Body string `json:"body"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		log.Printf("WARNING: failed to decode release body: %v", err)
-		log.Print("INFO: falling back to compare URL")
+		log.Printf("ERROR: failed to decode release body: %v", err)
+		log.Print("WARNING: falling back to compare URL")
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return &compare, nil, nil
+		return &compare, nil
 	}
 
 	if strings.TrimSpace(release.Body) == "" {
-		log.Print("No release notes found, falling back to compare URL")
+		log.Print("WARNING: found empty release body, falling back to compare URL")
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return &compare, nil, nil
+		return &compare, nil
 	}
 
 	releaseBody := release.Body
-	return nil, &releaseBody, nil
+	return nil, &releaseBody
 }
 
 func runMelangeCommand(config Config, filePath, versionToUse, originalVersion, owner, repo string, expectedCommitNeeded bool) error {
