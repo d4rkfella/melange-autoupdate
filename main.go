@@ -296,7 +296,7 @@ func main() {
 	currentVersion := ReconstructPackageVersion(&config)
 	newVersion := versionResult.Original
 	generatePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
-	writeOutput(newVersion, config.Package.Name, true)
+	writeOutput(versionToUse, config.Package.Name, true)
 }
 
 func parseGitHubRepo(repoURL string) (owner, repo string, err error) {
