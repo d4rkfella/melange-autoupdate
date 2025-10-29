@@ -808,7 +808,7 @@ func generatePRBody(owner, repo, oldVersion, newVersion, packageName string) {
 	prBodyPath := "pr_body.md"
 	err := os.WriteFile(prBodyPath, []byte(prBody), 0644)
 	if err != nil {
-		log.Fatalf("failed to write PR body file: %w", err)
+		log.Fatalf("failed to write PR body file: %v", err)
 	}
 }
 
