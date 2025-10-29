@@ -798,12 +798,16 @@ func GeneratePRBody(owner, repo, oldVersion, newVersion, packageName string) err
 		return fmt.Errorf("failed to generate release notes or compare URL: %w", err)
 	}
 
-	if releaseNotes != "" {
-		prBody += fmt.Sprintf("\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n%s\n</details>\n", releaseNotes)
-	}
-
-	if compareURL != "" {
-		prBody += fmt.Sprintf("\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n", compareURL, newVersion)
+	if releaseNotes != nil {
+		prBody += fmt.Sprintf(
+			"\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n%s\n</details>\n",
+			releaseNotes,
+		)
+	} else {
+		prBody += fmt.Sprintf(
+			"\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n",
+			compareURL, newVersion,
+		)
 	}
 
 	prBodyPath := "pr_body.md"
@@ -819,8 +823,8 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, newVersion)
 	resp, err := http.Get(apiURL)
 	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Print("Could not fetch release notes from GitHub, falling back to compare URL")
-		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), "", nil
+		log.Print("WARNING: failed to fetch release notes from GitHub, falling back to compare URL")
+		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), nil, nil
 	}
 	defer resp.Body.Close()
 
@@ -828,15 +832,17 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 		Body string `json:"body"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", "", fmt.Errorf("failed to decode release body: %w", err)
+		log.Printf("WARNING: failed to decode release body: %w", err)
+		log.Print("INFO: falling back to compare URL")
+		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), nil, nil
 	}
 
 	if strings.TrimSpace(release.Body) == "" {
 		log.Print("No release notes found, falling back to compare URL")
-		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), "", nil
+		return fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion), nil, nil
 	}
 
-	return "", release.Body, nil
+	return nil, release.Body, nil
 }
 
 func runMelangeCommand(config Config, filePath, versionToUse, originalVersion, owner, repo string, expectedCommitNeeded bool) error {
@@ -846,7 +852,7 @@ func runMelangeCommand(config Config, filePath, versionToUse, originalVersion, o
 	if expectedCommitNeeded {
 		commitHash, err := fetchGitHubCommitHash(owner, repo, originalVersion)
 		if err != nil {
-			log.Printf("unable to get commit hash: %v", err)
+			log.Fatalf("ERROR: unable to fetch commit hash: %v", err)
 		} else {
 			args = append(args, "--expected-commit="+commitHash)
 		}
