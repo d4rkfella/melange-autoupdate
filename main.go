@@ -800,13 +800,14 @@ func GeneratePRBody(owner, repo, oldVersion, newVersion, packageName string) err
 
 	if releaseNotes != nil {
 		prBody += fmt.Sprintf(
-			"\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n%s\n</details>\n",
-			releaseNotes,
+		  "\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n%s\n</details>\n",
+		  *releaseNotes,
 		)
 	} else {
 		prBody += fmt.Sprintf(
-			"\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n",
-			compareURL, newVersion,
+		  "\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n",
+		  *compareURL,
+		  newVersion,
 		)
 	}
 
@@ -833,7 +834,7 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 		Body string `json:"body"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		log.Printf("WARNING: failed to decode release body: %w", err)
+		log.Printf("WARNING: failed to decode release body: %v", err)
 		log.Print("INFO: falling back to compare URL")
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
 		return &compare, nil, nil
