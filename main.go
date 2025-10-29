@@ -766,7 +766,7 @@ func ReconstructPackageVersion(config *Config) string {
 
 		if transform.compiled.MatchString(currentVersion) {
 			transformedVersion := transform.compiled.ReplaceAllString(version, transform.Replace)
-			log.Printf("INFO applied transform '%s': %s -> %s", transform.To, currentVersion, transformedVersion)
+			log.Printf("INFO applied transform '%s': %s -> %s", transform.To, version, transformedVersion)
 			version = transformedVersion
 		}
 	}
