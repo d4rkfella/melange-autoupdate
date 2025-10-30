@@ -39,25 +39,21 @@ type Config struct {
 	Update        Update         `yaml:"update"`
 	Pipeline      []PipelineStep `yaml:"pipeline"`
 	VarTransforms []VarTransform `yaml:"var-transforms,omitempty"`
+	Environment   *Environment   `yaml:"environment,omitempty"`
+}
+
+type Environment struct {
+	Environment map[string]string `yaml:"environment"`
 }
 
 func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	type rawConfig struct {
-		Package       Package        `yaml:"package"`
-		Update        Update         `yaml:"update"`
-		Pipeline      []PipelineStep `yaml:"pipeline"`
-		VarTransforms []VarTransform `yaml:"var-transforms,omitempty"`
-	}
-
-	var raw rawConfig
+	type alias Config
+	var raw alias
 	if err := unmarshal(&raw); err != nil {
 		return err
 	}
 
-	c.Package = raw.Package
-	c.Update = raw.Update
-	c.Pipeline = raw.Pipeline
-	c.VarTransforms = raw.VarTransforms
+	*c = Config(raw)
 
 	for i := range c.VarTransforms {
 		re, err := regexp.Compile(c.VarTransforms[i].Match)
@@ -70,23 +66,10 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
-func (c *Config) Validate() error {
-	if c.Package.Name == "" {
-		return fmt.Errorf("package name missing from provided config file")
-	}
-	if c.Package.Version == "" {
-		return fmt.Errorf("package version missing from provided config file")
-	}
-	if c.Package.Epoch == nil {
-		return fmt.Errorf("package epoch missing from provided config file")
-	}
-	return nil
-}
-
 type Package struct {
 	Name    string `yaml:"name"`
 	Version string `yaml:"version"`
-	Epoch   *int    `yaml:"epoch"`
+	Epoch   *int   `yaml:"epoch"`
 }
 
 type VersionTransform struct {
@@ -116,31 +99,17 @@ type Update struct {
 }
 
 func (u *Update) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	type rawUpdate struct {
-		Enabled             bool               `yaml:"enabled"`
-		Manual              bool               `yaml:"manual"`
-		Shared              bool               `yaml:"shared"`
-		RequireSequential   bool               `yaml:"require-sequential"`
-		ReleaseMonitor      *ReleaseMonitor    `yaml:"release-monitor,omitempty"`
-		GitHub              *GitHub            `yaml:"github,omitempty"`
-		Git                 *Git               `yaml:"git,omitempty"`
-		IgnoreRegexPatterns []string           `yaml:"ignore-regex-patterns,omitempty"`
-		VersionTransforms   []VersionTransform `yaml:"version-transform,omitempty"`
+	type alias Update
+	var raw struct {
+		Data                alias    `yaml:",inline"`
+		IgnoreRegexPatterns []string `yaml:"ignore-regex-patterns,omitempty"`
 	}
 
-	var raw rawUpdate
 	if err := unmarshal(&raw); err != nil {
 		return err
 	}
 
-	u.Enabled = raw.Enabled
-	u.Manual = raw.Manual
-	u.Shared = raw.Shared
-	u.RequireSequential = raw.RequireSequential
-	u.ReleaseMonitor = raw.ReleaseMonitor
-	u.GitHub = raw.GitHub
-	u.Git = raw.Git
-	u.VersionTransforms = raw.VersionTransforms
+	*u = Update(raw.Data)
 
 	for _, pattern := range raw.IgnoreRegexPatterns {
 		re, err := regexp.Compile(pattern)
@@ -198,120 +167,35 @@ var httpClient = &http.Client{
 	},
 }
 
-func main() {
-	if len(os.Args) < 2 {
-		log.Fatal("ERROR: please provide a valid Melange config file path")
+func parseGitHubRepo(repoURL string, expectedIdentifier string) (owner, repo string, err error) {
+	if !strings.HasPrefix(repoURL, "http://") && !strings.HasPrefix(repoURL, "https://") {
+		return "", "", fmt.Errorf("invalid repo URL %q: missing scheme (http:// or https://)", repoURL)
 	}
-	filePath := os.Args[1]
-	data, err := os.ReadFile(filePath)
+
+	u, err := url.Parse(repoURL)
 	if err != nil {
-		log.Fatal(err)
+		return "", "", fmt.Errorf("failed to parse repo URL %q: %v", repoURL, err)
 	}
 
-	var config Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		log.Fatalf("ERROR: failed to unmarshal Melange yaml config: %v", err)
+	if u.Host != "github.com" {
+		return "", "", fmt.Errorf("invalid GitHub URL %q: host must be github.com", repoURL)
 	}
 
-	if err := config.Validate(); err != nil {
-		log.Fatalf("ERROR: invalid Melange yaml config: %v", err)
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid GitHub path %q: must be /owner/repo", u.Path)
 	}
 
-	if !config.Update.Enabled {
-		log.Printf("Updates are disabled for package %s, skipping.", config.Package.Name)
-		writeOutput("", "", false)
-		return
-	}
+	owner, repo = parts[0], parts[1]
 
-	var versionResult VersionResult
-	if config.Update.ReleaseMonitor != nil {
-		versionResult, err = getLatestReleaseMonitorVersion(&config.Update)
-	} else if config.Update.GitHub != nil {
-		versionResult, err = getLatestGitHubVersion(&config.Update)
-	} else {
-		log.Fatal("ERROR: update provider not configured")
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var versionToUse string
-	if len(config.Update.VersionTransforms) > 0 {
-		transformedVersion := applyVersionTransforms(versionResult.Processed, config.Update.VersionTransforms)
-		versionToUse = transformedVersion
-	} else {
-		versionToUse = versionResult.Processed
-	}
-
-	if !isStrictSameFormat(versionToUse, config.Package.Version) {
-		log.Fatalf("ERROR: Version format mismatch during comparison.\nFetched latest version: %q\nCurrent package version: %q\nPlease review your version transform rules.", versionToUse, config.Package.Version)
-	}
-
-	if compareVersions(versionToUse, config.Package.Version) <= 0 {
-		log.Printf("INFO: package version already up to date.")
-		writeOutput("", "", false)
-		return
-	}
-
-
-	var (
-		expectedCommitNeeded bool
-		repoURL              string
-	)
-
-	for _, step := range config.Pipeline {
-		if step.Uses == "git-checkout" {
-			if _, ok := step.With["expected-commit"]; ok {
-				expectedCommitNeeded = true
-			}
-			if r, ok := step.With["repository"].(string); ok {
-				repoURL = r
-			}
-			break
+	if expectedIdentifier != "" {
+		expectedParts := strings.Split(expectedIdentifier, "/")
+		if len(expectedParts) == 2 && (expectedParts[0] != owner || expectedParts[1] != repo) {
+			return "", "", fmt.Errorf("repo URL %q does not match update identifier %q", repoURL, expectedIdentifier)
 		}
 	}
 
-	if repoURL == "" {
-		log.Fatal("git-checkout step does not have a defined repository")
-	}
-
-	owner, repo, err := parseGitHubRepo(repoURL)
-	if err != nil {
-		log.Fatalf("Failed to parse GitHub repo URL: %v", err)
-	}
-	if err := runMelangeCommand(config, filePath, versionToUse, versionResult.Original, owner, repo, expectedCommitNeeded); err != nil {
-		log.Fatalf("Failed to execute melange bump command: %v", err)
-	}
-	if config.Package.Epoch == nil || *config.Package.Epoch != 0 {
-	    log.Print("INFO: Resetting epoch config value to 0")
-	    zero := 0
-	    config.Package.Epoch = &zero
-	
-	    outData, err := yaml.Marshal(&config)
-	    if err != nil {
-	        log.Fatalf("ERROR: Failed to serialize the updated Melange config to YAML: %v", err)
-	    }
-	    if err := os.WriteFile(filePath, outData, 0644); err != nil {
-	        log.Fatalf("ERROR: Failed to write updated Melange config to %s: %v", filePath, err)
-	    }
-	}
-
-	currentVersion := ReconstructPackageVersion(&config)
-	newVersion := versionResult.Original
-	generatePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
-	writeOutput(versionToUse, config.Package.Name, true)
-}
-
-func parseGitHubRepo(repoURL string) (owner, repo string, err error) {
-	u, err := url.Parse(repoURL)
-	if err != nil {
-		return "", "", err
-	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) < 2 {
-		return "", "", fmt.Errorf("invalid GitHub URL: %s", repoURL)
-	}
-	return parts[0], parts[1], nil
+	return owner, repo, nil
 }
 
 func fetchGitHubCommitHash(owner, repo, originalVersion string) (string, error) {
@@ -396,7 +280,7 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 	filtered := filterAndProcessVersions(data.Versions, update.IgnoreRegexPatterns, rm.StripPrefix, rm.StripSuffix, rm.VersionFilterPrefix, rm.VersionFilterContains)
 
 	if len(filtered) == 0 {
-		return VersionResult{}, fmt.Errorf("no valid versions found.")
+		return VersionResult{}, fmt.Errorf("no valid versions found")
 	}
 
 	sort.Slice(filtered, func(i, j int) bool {
@@ -408,18 +292,13 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 	return latest, nil
 }
 
-func getLatestGitHubVersion(update *Update) (VersionResult, error) {
+func getLatestGitHubVersion(update *Update, includePreReleases bool) (VersionResult, error) {
 	gh := update.GitHub
 	parts := strings.Split(gh.Identifier, "/")
 	if len(parts) != 2 {
 		return VersionResult{}, fmt.Errorf("invalid GitHub identifier: %s", gh.Identifier)
 	}
 	owner, repo := parts[0], parts[1]
-
-	includePreReleases := false
-	if envSkip := os.Getenv("SKIP_PRERELEASES"); envSkip != "" {
-		includePreReleases = strings.ToLower(envSkip) == "false"
-	}
 
 	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/", owner, repo)
 	var tagNames []string
@@ -709,7 +588,7 @@ func isNumeric(s string) bool {
 func writeOutput(newVersion, packageName string, bumped bool) {
 	outputPath := "output.json"
 
-	update_info := struct {
+	updateInfo := struct {
 		Bumped      bool   `json:"bumped"`
 		PackageName string `json:"package_name"`
 		NewVersion  string `json:"new_version"`
@@ -719,7 +598,7 @@ func writeOutput(newVersion, packageName string, bumped bool) {
 		NewVersion:  newVersion,
 	}
 
-	data, err := json.MarshalIndent(update_info, "", "  ")
+	data, err := json.MarshalIndent(updateInfo, "", "  ")
 	if err != nil {
 		log.Fatalf("ERROR: Failed to serialize version update info: %v", err)
 	}
@@ -729,7 +608,7 @@ func writeOutput(newVersion, packageName string, bumped bool) {
 	}
 }
 
-func ReconstructPackageVersion(config *Config) string {
+func reconstructPackageVersion(config *Config) string {
 	version := config.Package.Version
 
 	var filterVarTransforms []VarTransform
@@ -755,13 +634,13 @@ func ReconstructPackageVersion(config *Config) string {
 
 	for _, transform := range filterVarTransforms {
 		if !tagUsesTransform[transform.To] {
-			log.Printf("INFO skipping var transform '%s' — not used in git-checkout step", transform.To)
+			log.Printf("INFO: skipping var transform '%s' — not used in git-checkout step", transform.To)
 			continue
 		}
 
 		if transform.compiled.MatchString(version) {
 			transformedVersion := transform.compiled.ReplaceAllString(version, transform.Replace)
-			log.Printf("INFO applied transform '%s': %s -> %s", transform.To, version, transformedVersion)
+			log.Printf("INFO: applied transform '%s': %s -> %s", transform.To, version, transformedVersion)
 			version = transformedVersion
 		}
 	}
@@ -792,18 +671,18 @@ func generatePRBody(owner, repo, oldVersion, newVersion, packageName string) {
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
 
-	compareURL, releaseNotes := GenerateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
+	compareURL, releaseNotes := generateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
 
 	if releaseNotes != nil {
 		prBody += fmt.Sprintf(
-		  "\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n%s\n</details>\n",
-		  *releaseNotes,
+			"\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n%s\n</details>\n",
+			*releaseNotes,
 		)
-	} else {
+	} else if compareURL != nil {
 		prBody += fmt.Sprintf(
-		  "\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n",
-		  *compareURL,
-		  newVersion,
+			"\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n",
+			*compareURL,
+			newVersion,
 		)
 	}
 
@@ -814,13 +693,26 @@ func generatePRBody(owner, repo, oldVersion, newVersion, packageName string) {
 	}
 }
 
-func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (*string, *string) {
+func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (*string, *string) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, newVersion)
-	resp, err := http.Get(apiURL)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Print("WARNING: failed to fetch release notes from GitHub, falling back to compare URL")
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		log.Printf("WARNING: failed to create request for release notes: %v", err)
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return &compare, nil
+		return nil, &compare
+	}
+
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("User-Agent", "melange-updater/1.0")
+
+	resp, err := httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		log.Printf("WARNING: failed to fetch release notes from GitHub, falling back to compare URL: %v", err)
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return nil, &compare
 	}
 	defer resp.Body.Close()
 
@@ -828,23 +720,21 @@ func GenerateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 		Body string `json:"body"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		log.Printf("ERROR: failed to decode release body: %v", err)
-		log.Print("WARNING: falling back to compare URL")
+		log.Printf("WARNING: failed to decode release body, falling back to compare URL: %v", err)
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return &compare, nil
+		return nil, &compare
 	}
 
-	if strings.TrimSpace(release.Body) == "" {
-		log.Print("WARNING: found empty release body, falling back to compare URL")
+	body := strings.TrimSpace(release.Body)
+	if body == "" {
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return &compare, nil
+		return nil, &compare
 	}
 
-	releaseBody := release.Body
-	return nil, &releaseBody
+	return &body, nil
 }
 
-func runMelangeCommand(config Config, filePath, versionToUse, originalVersion, owner, repo string, expectedCommitNeeded bool) error {
+func runMelangeCommand(filePath, versionToUse, originalVersion, owner, repo string, expectedCommitNeeded bool) {
 
 	args := []string{"bump", filePath, versionToUse}
 
@@ -857,13 +747,102 @@ func runMelangeCommand(config Config, filePath, versionToUse, originalVersion, o
 		}
 	}
 
-	fmt.Printf("Running: melange %s\n", strings.Join(args, " "))
+	log.Printf("INFO: executing command melange %s\n", strings.Join(args, " "))
 	cmd := exec.Command("melange", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return err
+		log.Fatalf("ERROR: unable to execute melange bump command: %v", err)
+	}
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		log.Fatal("ERROR: please provide a valid Melange config file path")
+	}
+	filePath := os.Args[1]
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	return nil
+	var config Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		log.Fatalf("ERROR: failed to unmarshal Melange yaml config: %v", err)
+	}
+
+	if !config.Update.Enabled {
+		log.Printf("WARNING: Updates are disabled for package %s, skipping.", config.Package.Name)
+		writeOutput("", "", false)
+		return
+	}
+
+	includePreReleases := false
+
+	if config.Environment != nil && config.Environment.Environment != nil {
+		if val, ok := config.Environment.Environment["PACKAGE_UPDATE_USE_PRERELEASE"]; ok {
+			includePreReleases = strings.EqualFold(val, "true") || val == "1"
+		}
+	}
+
+	var versionResult VersionResult
+	if config.Update.ReleaseMonitor != nil {
+		versionResult, err = getLatestReleaseMonitorVersion(&config.Update)
+	} else if config.Update.GitHub != nil {
+		versionResult, err = getLatestGitHubVersion(&config.Update, includePreReleases)
+	} else {
+		log.Fatal("ERROR: update provider not configured")
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var versionToUse string
+	if len(config.Update.VersionTransforms) > 0 {
+		transformedVersion := applyVersionTransforms(versionResult.Processed, config.Update.VersionTransforms)
+		versionToUse = transformedVersion
+	} else {
+		versionToUse = versionResult.Processed
+	}
+
+	if !isStrictSameFormat(versionToUse, config.Package.Version) {
+		log.Fatalf("ERROR: version format mismatch during comparison.\nlatest version string after processing: %q\nCurrent package version: %q\nPlease review your version transform rules.", versionToUse, config.Package.Version)
+	}
+
+	if compareVersions(versionToUse, config.Package.Version) <= 0 {
+		log.Printf("INFO: package version already up to date.")
+		writeOutput("", "", false)
+		return
+	}
+
+	var (
+		expectedCommitNeeded bool
+		repoURL              string
+	)
+
+	for _, step := range config.Pipeline {
+		if step.Uses == "git-checkout" {
+			if _, ok := step.With["expected-commit"]; ok {
+				expectedCommitNeeded = true
+			}
+			if r, ok := step.With["repository"].(string); ok {
+				repoURL = r
+			}
+			break
+		}
+	}
+
+	if repoURL == "" {
+		log.Fatal("ERROR: git-checkout step does not have a defined repository")
+	}
+
+	owner, repo, err := parseGitHubRepo(repoURL, config.Update.GitHub.Identifier)
+	if err != nil {
+		log.Fatalf("ERROR: gitHub repo validation failed: %v", err)
+	}
+	runMelangeCommand(filePath, versionToUse, versionResult.Original, owner, repo, expectedCommitNeeded)
+	currentVersion := reconstructPackageVersion(&config)
+	newVersion := versionResult.Original
+	generatePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
+	writeOutput(versionToUse, config.Package.Name, true)
 }
