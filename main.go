@@ -190,16 +190,36 @@ func parseGitHubRepo(repoURL string, expectedIdentifier string) (owner, repo str
 
 	if expectedIdentifier != "" {
 		expectedParts := strings.Split(expectedIdentifier, "/")
-		if len(expectedParts) == 2 && (expectedParts[0] != owner || expectedParts[1] != repo) {
-			return "", "", fmt.Errorf("repo URL %q does not match update identifier %q", repoURL, expectedIdentifier)
+		if len(expectedParts) == 2 {
+			if expectedParts[0] != owner || expectedParts[1] != repo {
+				return "", "", fmt.Errorf(
+					"repo URL %q does not match update identifier %q", repoURL, expectedIdentifier,
+				)
+			}
 		}
 	}
 
 	return owner, repo, nil
 }
 
+func getGitCheckoutTag(version string, pipeline []PipelineStep) string {
+	for _, step := range pipeline {
+		if step.Uses == "git-checkout" {
+			if tagTemplate, ok := step.With["tag"].(string); ok && tagTemplate != "" {
+				prefix := strings.ReplaceAll(tagTemplate, "${{package.version}}", "")
+				if !strings.HasPrefix(version, prefix) {
+					return prefix + version
+				}
+				return version
+			}
+		}
+	}
+	return version
+}
+
 func fetchGitHubCommitHash(owner, repo, originalVersion string) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/tags/%s", owner, repo, originalVersion)
+	log.Printf("INFO: fetching GitHub ref for URL: %s", url)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
@@ -261,26 +281,51 @@ func fetchAnnotatedTagCommit(url string) (string, error) {
 	return tagData.Object.SHA, nil
 }
 
-func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
+func getLatestReleaseMonitorVersion(update *Update, includePreReleases bool) (VersionResult, error) {
 	rm := update.ReleaseMonitor
 	url := fmt.Sprintf("https://release-monitoring.org/api/v2/versions/?project_id=%d", rm.Identifier)
+
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		return VersionResult{}, err
+		return VersionResult{}, fmt.Errorf("failed to fetch project info: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var data struct {
-		Versions []string `json:"versions"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return VersionResult{}, err
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return VersionResult{}, fmt.Errorf("release-monitoring API error (%d): %s", resp.StatusCode, string(body))
 	}
 
-	filtered := filterAndProcessVersions(data.Versions, update.IgnoreRegexPatterns, rm.StripPrefix, rm.StripSuffix, rm.VersionFilterPrefix, rm.VersionFilterContains)
+	var project struct {
+		Versions       []string `json:"versions"`
+		StableVersions []string `json:"stable_versions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		return VersionResult{}, fmt.Errorf("failed to decode project data: %w", err)
+	}
+
+	var versions []string
+	if includePreReleases {
+		versions = project.Versions
+	} else {
+		versions = project.StableVersions
+	}
+
+	if len(versions) == 0 {
+		return VersionResult{}, fmt.Errorf("no valid versions found")
+	}
+
+	filtered := filterAndProcessVersions(
+		versions,
+		update.IgnoreRegexPatterns,
+		rm.StripPrefix,
+		rm.StripSuffix,
+		rm.VersionFilterPrefix,
+		rm.VersionFilterContains,
+	)
 
 	if len(filtered) == 0 {
-		return VersionResult{}, fmt.Errorf("no valid versions found")
+		return VersionResult{}, fmt.Errorf("no valid versions found after filtering")
 	}
 
 	sort.Slice(filtered, func(i, j int) bool {
@@ -288,7 +333,7 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 	})
 
 	latest := filtered[len(filtered)-1]
-	log.Printf("INFO selected latest version: %s (from original %s)", latest.Processed, latest.Original)
+	log.Printf("INFO: latest version selected for comparison: %s (after processing: %s)", latest.Original, latest.Processed)
 	return latest, nil
 }
 
@@ -431,7 +476,7 @@ func getLatestGitHubVersion(update *Update, includePreReleases bool) (VersionRes
 	})
 
 	picked := all[len(all)-1]
-	log.Printf("INFO selected latest version: %s", picked.Original)
+	log.Printf("INFO: selected latest version: %s", picked.Original)
 
 	return VersionResult{
 		Original:  picked.Original,
@@ -666,21 +711,22 @@ func reconstructPackageVersion(config *Config) string {
 	return version
 }
 
-func generatePRBody(owner, repo, oldVersion, newVersion, packageName string) {
+func generatePRBody(owner, repo, currentVersion, newVersion, packageName string) {
+	log.Printf("INFO: generating PR body for new version: %s", newVersion)
 	prBody := "### 📦 Automated Package Update\n\n"
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
 
-	releaseNotes, compareURL := generateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
+	releaseNotes, compareURL := generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion)
 
 	if releaseNotes != nil {
 		prBody += fmt.Sprintf(
-			"\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n%s\n</details>\n",
+			"\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n\n%s\n\n</details>\n",
 			*releaseNotes,
 		)
 	} else if compareURL != nil {
 		prBody += fmt.Sprintf(
-			"\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n",
+			"\n\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n\n",
 			*compareURL,
 			newVersion,
 		)
@@ -734,19 +780,12 @@ func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 	return &body, nil
 }
 
-func runMelangeCommand(filePath, versionToUse, originalVersion, owner, repo string, expectedCommitNeeded bool) {
+func runMelangeCommand(filePath, versionToUse, commitHash string) {
 
 	args := []string{"bump", filePath, versionToUse}
-
-	if expectedCommitNeeded {
-		commitHash, err := fetchGitHubCommitHash(owner, repo, originalVersion)
-		if err != nil {
-			log.Fatalf("ERROR: unable to fetch commit hash: %v", err)
-		} else {
-			args = append(args, "--expected-commit="+commitHash)
-		}
+	if commitHash != "" {
+		args = append(args, "--expected-commit="+commitHash)
 	}
-
 	log.Printf("INFO: executing command melange %s\n", strings.Join(args, " "))
 	cmd := exec.Command("melange", args...)
 	cmd.Stdout = os.Stdout
@@ -785,9 +824,40 @@ func main() {
 		}
 	}
 
+	var owner, repo, repoURL string
+	var expectedCommitNeeded bool
+
+	for _, step := range config.Pipeline {
+		if step.Uses == "git-checkout" {
+			if _, ok := step.With["expected-commit"]; ok {
+				expectedCommitNeeded = true
+			}
+			if r, ok := step.With["repository"].(string); ok {
+				repoURL = r
+			}
+			break
+		}
+	}
+
+	if repoURL == "" {
+		log.Fatal("ERROR: git-checkout step does not have a defined repository")
+	}
+
+	if config.Update.GitHub != nil {
+		owner, repo, err = parseGitHubRepo(repoURL, config.Update.GitHub.Identifier)
+		if err != nil {
+			log.Fatalf("ERROR: GitHub repo validation failed: %v", err)
+		}
+	} else {
+		owner, repo, err = parseGitHubRepo(repoURL, "")
+		if err != nil {
+			log.Fatalf("ERROR: failed to parse repository URL: %v", err)
+		}
+	}
+
 	var versionResult VersionResult
 	if config.Update.ReleaseMonitor != nil {
-		versionResult, err = getLatestReleaseMonitorVersion(&config.Update)
+		versionResult, err = getLatestReleaseMonitorVersion(&config.Update, includePreReleases)
 	} else if config.Update.GitHub != nil {
 		versionResult, err = getLatestGitHubVersion(&config.Update, includePreReleases)
 	} else {
@@ -815,34 +885,17 @@ func main() {
 		return
 	}
 
-	var (
-		expectedCommitNeeded bool
-		repoURL              string
-	)
+	currentVersion := reconstructPackageVersion(&config)
+	newVersion := getGitCheckoutTag(versionResult.Original, config.Pipeline)
+	commitHash := ""
 
-	for _, step := range config.Pipeline {
-		if step.Uses == "git-checkout" {
-			if _, ok := step.With["expected-commit"]; ok {
-				expectedCommitNeeded = true
-			}
-			if r, ok := step.With["repository"].(string); ok {
-				repoURL = r
-			}
-			break
+	if expectedCommitNeeded {
+		commitHash, err = fetchGitHubCommitHash(owner, repo, newVersion)
+		if err != nil {
+			log.Fatalf("ERROR: unable to fetch commit hash: %v", err)
 		}
 	}
-
-	if repoURL == "" {
-		log.Fatal("ERROR: git-checkout step does not have a defined repository")
-	}
-
-	owner, repo, err := parseGitHubRepo(repoURL, config.Update.GitHub.Identifier)
-	if err != nil {
-		log.Fatalf("ERROR: gitHub repo validation failed: %v", err)
-	}
-	runMelangeCommand(filePath, versionToUse, versionResult.Original, owner, repo, expectedCommitNeeded)
-	currentVersion := reconstructPackageVersion(&config)
-	newVersion := versionResult.Original
+	runMelangeCommand(filePath, versionToUse, commitHash)
 	generatePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
 	writeOutput(versionToUse, config.Package.Name, true)
 }
