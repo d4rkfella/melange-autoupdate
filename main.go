@@ -282,17 +282,18 @@ func main() {
 	if err := runMelangeCommand(config, filePath, versionToUse, versionResult.Original, owner, repo, expectedCommitNeeded); err != nil {
 		log.Fatalf("Failed to execute melange bump command: %v", err)
 	}
-	if config.Package.Epoch != 0 {
-		log.Print("INFO: Reseting epoch config value to 0")
-		config.Package.Epoch = 0
+	if config.Package.Epoch == nil || *config.Package.Epoch != 0 {
+	    log.Print("INFO: Resetting epoch config value to 0")
+	    zero := 0
+	    config.Package.Epoch = &zero
 	
-		outData, err := yaml.Marshal(&config)
-		if err != nil {
-			log.Fatalf("ERROR: Failed to serialize the updated Melange config to YAML: %v", err)
-		}
-		if err := os.WriteFile(filePath, outData, 0644); err != nil {
-			log.Fatalf("ERROR: Failed to write updated Melange config to %s: %v", filePath, err)
-		}
+	    outData, err := yaml.Marshal(&config)
+	    if err != nil {
+	        log.Fatalf("ERROR: Failed to serialize the updated Melange config to YAML: %v", err)
+	    }
+	    if err := os.WriteFile(filePath, outData, 0644); err != nil {
+	        log.Fatalf("ERROR: Failed to write updated Melange config to %s: %v", filePath, err)
+	    }
 	}
 
 	currentVersion := ReconstructPackageVersion(&config)
