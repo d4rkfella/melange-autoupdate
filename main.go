@@ -77,7 +77,7 @@ func (c *Config) Validate() error {
 	if c.Package.Version == "" {
 		return fmt.Errorf("package version missing from provided config file")
 	}
-	if c.Package.Epoch == "" {
+	if c.Package.Epoch == nil {
 		return fmt.Errorf("package epoch missing from provided config file")
 	}
 	return nil
@@ -86,7 +86,7 @@ func (c *Config) Validate() error {
 type Package struct {
 	Name    string `yaml:"name"`
 	Version string `yaml:"version"`
-	Epoch   int    `yaml:"epoch"`
+	Epoch   *int    `yaml:"epoch"`
 }
 
 type VersionTransform struct {
