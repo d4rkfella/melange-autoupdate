@@ -83,7 +83,7 @@ func (c *Config) Validate() error {
 type Package struct {
 	Name    string `yaml:"name"`
 	Version string `yaml:"version"`
-	Epoch   int    `yaml:"epoch,omitempty"`
+	Epoch   int    `yaml:"epochy"`
 }
 
 type VersionTransform struct {
