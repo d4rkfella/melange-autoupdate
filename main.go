@@ -72,10 +72,13 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 func (c *Config) Validate() error {
 	if c.Package.Name == "" {
-		return fmt.Errorf("package name is required")
+		return fmt.Errorf("package name missing from provided config file")
 	}
 	if c.Package.Version == "" {
-		return fmt.Errorf("package version is required")
+		return fmt.Errorf("package version missing from provided config file")
+	}
+	if c.Package.Epoch == "" {
+		return fmt.Errorf("package epoch missing from provided config file")
 	}
 	return nil
 }
@@ -83,7 +86,7 @@ func (c *Config) Validate() error {
 type Package struct {
 	Name    string `yaml:"name"`
 	Version string `yaml:"version"`
-	Epoch   int    `yaml:"epochy"`
+	Epoch   int    `yaml:"epoch"`
 }
 
 type VersionTransform struct {
@@ -213,7 +216,6 @@ func main() {
 	if err := config.Validate(); err != nil {
 		log.Fatalf("ERROR: invalid Melange yaml config: %v", err)
 	}
-	log.Printf("Parsed update config: %+v", config.Update)
 
 	if !config.Update.Enabled {
 		log.Printf("Updates are disabled for package %s, skipping.", config.Package.Name)
@@ -251,18 +253,6 @@ func main() {
 		return
 	}
 
-	if config.Package.Epoch != 0 {
-		log.Print("INFO: Reseting epoch config value to 0")
-		config.Package.Epoch = 0
-	
-		outData, err := yaml.Marshal(&config)
-		if err != nil {
-			log.Fatalf("ERROR: Failed to serialize the updated Melange config to YAML: %v", err)
-		}
-		if err := os.WriteFile(filePath, outData, 0644); err != nil {
-			log.Fatalf("ERROR: Failed to write updated Melange config to %s: %v", filePath, err)
-		}
-	}
 
 	var (
 		expectedCommitNeeded bool
@@ -291,6 +281,18 @@ func main() {
 	}
 	if err := runMelangeCommand(config, filePath, versionToUse, versionResult.Original, owner, repo, expectedCommitNeeded); err != nil {
 		log.Fatalf("Failed to execute melange bump command: %v", err)
+	}
+	if config.Package.Epoch != 0 {
+		log.Print("INFO: Reseting epoch config value to 0")
+		config.Package.Epoch = 0
+	
+		outData, err := yaml.Marshal(&config)
+		if err != nil {
+			log.Fatalf("ERROR: Failed to serialize the updated Melange config to YAML: %v", err)
+		}
+		if err := os.WriteFile(filePath, outData, 0644); err != nil {
+			log.Fatalf("ERROR: Failed to write updated Melange config to %s: %v", filePath, err)
+		}
 	}
 
 	currentVersion := ReconstructPackageVersion(&config)
