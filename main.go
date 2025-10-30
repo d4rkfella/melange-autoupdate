@@ -671,7 +671,7 @@ func generatePRBody(owner, repo, oldVersion, newVersion, packageName string) {
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
 
-	compareURL, releaseNotes := generateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
+	releaseNotes, compareURL := generateReleaseNotesOrCompareURL(owner, repo, oldVersion, newVersion)
 
 	if releaseNotes != nil {
 		prBody += fmt.Sprintf(
