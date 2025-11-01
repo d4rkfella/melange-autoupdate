@@ -786,6 +786,7 @@ func runMelangeCommand(filePath, versionToUse, commitHash string) {
 	if commitHash != "" {
 		args = append(args, "--expected-commit="+commitHash)
 	}
+
 	log.Printf("INFO: executing command melange %s\n", strings.Join(args, " "))
 	cmd := exec.Command("melange", args...)
 	cmd.Stdout = os.Stdout
@@ -827,19 +828,25 @@ func main() {
 	var owner, repo, repoURL string
 	var expectedCommitNeeded bool
 
+	foundGitCheckout := false
+
 	for _, step := range config.Pipeline {
-		if step.Uses == "git-checkout" {
-			if _, ok := step.With["expected-commit"]; ok {
-				expectedCommitNeeded = true
-			}
-			if r, ok := step.With["repository"].(string); ok {
-				repoURL = r
+		if strings.Contains(step.Uses, "git-checkout") {
+			foundGitCheckout = true
+
+			if step.With != nil {
+				if _, ok := step.With["expected-commit"]; ok {
+					expectedCommitNeeded = true
+				}
+				if r, ok := step.With["repository"].(string); ok {
+					repoURL = r
+				}
 			}
 			break
 		}
 	}
 
-	if repoURL == "" {
+	if foundGitCheckout && repoURL == "" {
 		log.Fatal("ERROR: git-checkout step does not have a defined repository")
 	}
 
