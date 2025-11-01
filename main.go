@@ -828,11 +828,11 @@ func main() {
 	var owner, repo, repoURL string
 	var expectedCommitNeeded bool
 
-	foundGitCheckout := false
+	foundGitCheckoutStep := false
 
 	for _, step := range config.Pipeline {
 		if strings.Contains(step.Uses, "git-checkout") {
-			foundGitCheckout = true
+			foundGitCheckoutStep = true
 
 			if step.With != nil {
 				if _, ok := step.With["expected-commit"]; ok {
@@ -846,19 +846,21 @@ func main() {
 		}
 	}
 
-	if foundGitCheckout && repoURL == "" {
-		log.Fatal("ERROR: git-checkout step does not have a defined repository")
-	}
-
-	if config.Update.GitHub != nil {
-		owner, repo, err = parseGitHubRepo(repoURL, config.Update.GitHub.Identifier)
-		if err != nil {
-			log.Fatalf("ERROR: GitHub repo validation failed: %v", err)
+	if foundGitCheckoutStep {
+		if repoURL == "" {
+			log.Fatal("ERROR: git-checkout step does not have a defined repository")
 		}
-	} else {
-		owner, repo, err = parseGitHubRepo(repoURL, "")
-		if err != nil {
-			log.Fatalf("ERROR: failed to parse repository URL: %v", err)
+	
+		if config.Update.GitHub != nil {
+			owner, repo, err = parseGitHubRepo(repoURL, config.Update.GitHub.Identifier)
+			if err != nil {
+				log.Fatalf("ERROR: GitHub repo validation failed: %v", err)
+			}
+		} else {
+			owner, repo, err = parseGitHubRepo(repoURL, "")
+			if err != nil {
+				log.Fatalf("ERROR: failed to parse repository URL: %v", err)
+			}
 		}
 	}
 
