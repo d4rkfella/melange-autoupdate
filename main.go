@@ -22,8 +22,8 @@ import (
 
 var (
 	numRe = regexp.MustCompile(`\d+`)
-    prRe   = regexp.MustCompile(`#\d+`)
-    userRe = regexp.MustCompile(`@([A-Za-z0-9_-]+)`)
+	prRe   = regexp.MustCompile(`#(\d+)`)
+	userRe = regexp.MustCompile(`@([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?)`)
 )
 
 type VersionResult struct {
@@ -787,19 +787,19 @@ func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 }
 
 func sanitizeMentions(body, repoOwner, repoName string) string {
-    body = prRe.ReplaceAllStringFunc(body, func(m string) string {
-        prNum := strings.TrimPrefix(m, "#")
-        url := "https://redirect.github.com/" + repoOwner + "/" + repoName + "/pull/" + prNum
-        return "[#\u200b" + prNum + "](" + url + ")"
-    })
-
-    body = userRe.ReplaceAllStringFunc(body, func(m string) string {
-        username := strings.TrimPrefix(m, "@")
-        url := "https://redirect.github.com/" + username
-        return "[@\u200b" + username + "](" + url + ")"
-    })
-
-    return body
+	body = prRe.ReplaceAllStringFunc(body, func(m string) string {
+		prNum := strings.TrimPrefix(m, "#")
+		url := "https://github.com/" + repoOwner + "/" + repoName + "/pull/" + prNum
+		return "[#​" + prNum + "](" + url + ")"
+	})
+	
+	body = userRe.ReplaceAllStringFunc(body, func(m string) string {
+		username := strings.TrimPrefix(m, "@")
+		url := "https://github.com/" + username
+		return "[@​" + username + "](" + url + ")"
+	})
+	
+	return body
 }
 
 
