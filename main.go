@@ -716,77 +716,11 @@ func generatePRBody(owner, repo, currentVersion, newVersion, packageName string)
 	prBody := "### 📦 Automated Package Update\n\n"
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
-
-	releaseNotes, compareURL := generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion)
-
-	if releaseNotes != nil {
-		prBody += fmt.Sprintf(
-			"\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n\n%s\n\n</details>\n",
-			*releaseNotes,
-		)
-	} else if compareURL != nil {
-		prBody += fmt.Sprintf(
-			"\n\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n\n",
-			*compareURL,
-			newVersion,
-		)
-	}
-
 	prBodyPath := "pr_body.md"
 	err := os.WriteFile(prBodyPath, []byte(prBody), 0644)
 	if err != nil {
 		log.Fatalf("failed to write PR body file: %v", err)
 	}
-}
-
-func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (*string, *string) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, newVersion)
-
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		log.Printf("WARNING: failed to create request for release notes: %v", err)
-		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return nil, &compare
-	}
-
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	req.Header.Set("User-Agent", "melange-updater/1.0")
-
-	resp, err := httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Printf("WARNING: failed to fetch release notes from GitHub, falling back to compare URL: %v", err)
-		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return nil, &compare
-	}
-	defer resp.Body.Close()
-
-	var release struct {
-		Body string `json:"body"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		log.Printf("WARNING: failed to decode release body, falling back to compare URL: %v", err)
-		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return nil, &compare
-	}
-
-	body := strings.TrimSpace(release.Body)
-	if body == "" {
-		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
-		return nil, &compare
-	}
-	zwsp := "\u200B"
-
-    body = regexp.MustCompile(`(@[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)?|#[0-9]+)`).
-    ReplaceAllStringFunc(body, func(m string) string {
-        if m[0] == '@' || m[0] == '#' {
-            return string(m[0]) + zwsp + m[1:]
-        }
-        return m
-    })
-
-	return &body, nil
 }
 
 func runMelangeCommand(filePath, versionToUse, commitHash string) {
