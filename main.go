@@ -776,7 +776,15 @@ func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
 		return nil, &compare
 	}
-	body = regexp.MustCompile(`(@[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)?|#[0-9]+)`).ReplaceAllStringFunc(body, func(m string) string { return "`" + m + "`" })
+	zwsp := "\u200B"
+
+    body = regexp.MustCompile(`(@[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)?|#[0-9]+)`).
+    ReplaceAllStringFunc(body, func(m string) string {
+        if m[0] == '@' || m[0] == '#' {
+            return string(m[0]) + zwsp + m[1:]
+        }
+        return m
+    })
 
 	return &body, nil
 }
