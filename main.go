@@ -24,6 +24,7 @@ var (
 	numRe = regexp.MustCompile(`\d+`)
 	prRe   = regexp.MustCompile(`#(\d+)`)
 	userRe = regexp.MustCompile(`@([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?)`)
+	commitRe = regexp.MustCompile(`\b([a-f0-9]{7,40})\b`)
 )
 
 type VersionResult struct {
