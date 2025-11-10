@@ -20,7 +20,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var numRe = regexp.MustCompile(`\d+`)
+var (
+	numRe = regexp.MustCompile(`\d+`)
+    prRe   = regexp.MustCompile(`#\d+`)
+    userRe = regexp.MustCompile(`@([A-Za-z0-9_-]+)`)
+)
 
 type VersionResult struct {
 	Original  string
@@ -716,12 +720,88 @@ func generatePRBody(owner, repo, currentVersion, newVersion, packageName string)
 	prBody := "### 📦 Automated Package Update\n\n"
 	prBody += fmt.Sprintf("**Package:** %s\n", packageName)
 	prBody += fmt.Sprintf("**Source:** [https://github.com/%s/%s](https://github.com/%s/%s)\n\n", owner, repo, owner, repo)
+
+	releaseNotes, compareURL := generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion)
+
+	if releaseNotes != nil {
+		prBody += fmt.Sprintf(
+			"\n<details>\n<summary><b>📜 Release Notes</b></summary>\n\n\n%s\n\n</details>\n",
+			*releaseNotes,
+		)
+	} else if compareURL != nil {
+		prBody += fmt.Sprintf(
+			"\n\n<h3 dir=\"auto\"><a href=\"%s\"><code class=\"notranslate\">%s</code></a></h3>\n\n",
+			*compareURL,
+			newVersion,
+		)
+	}
+
 	prBodyPath := "pr_body.md"
 	err := os.WriteFile(prBodyPath, []byte(prBody), 0644)
 	if err != nil {
 		log.Fatalf("failed to write PR body file: %v", err)
 	}
 }
+
+func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion string) (*string, *string) {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, newVersion)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		log.Printf("WARNING: failed to create request for release notes: %v", err)
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return nil, &compare
+	}
+
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("User-Agent", "melange-updater/1.0")
+
+	resp, err := httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		log.Printf("WARNING: failed to fetch release notes from GitHub, falling back to compare URL: %v", err)
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return nil, &compare
+	}
+	defer resp.Body.Close()
+
+	var release struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		log.Printf("WARNING: failed to decode release body, falling back to compare URL: %v", err)
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return nil, &compare
+	}
+
+	body := strings.TrimSpace(release.Body)
+	if body == "" {
+		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
+		return nil, &compare
+	}
+	
+	body = sanitizeMentions(body, owner, repo)
+	
+	return &body, nil
+}
+
+func sanitizeMentions(body, repoOwner, repoName string) string {
+    body = prRe.ReplaceAllStringFunc(body, func(m string) string {
+        prNum := strings.TrimPrefix(m, "#")
+        url := "https://redirect.github.com/" + repoOwner + "/" + repoName + "/pull/" + prNum
+        return "[#\u200b" + prNum + "](" + url + ")"
+    })
+
+    body = userRe.ReplaceAllStringFunc(body, func(m string) string {
+        username := strings.TrimPrefix(m, "@")
+        url := "https://redirect.github.com/" + username
+        return "[@\u200b" + username + "](" + url + ")"
+    })
+
+    return body
+}
+
 
 func runMelangeCommand(filePath, versionToUse, commitHash string) {
 
