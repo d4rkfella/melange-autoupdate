@@ -789,14 +789,14 @@ func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 func sanitizeMentions(body, repoOwner, repoName string) string {
 	body = prRe.ReplaceAllStringFunc(body, func(m string) string {
 		prNum := strings.TrimPrefix(m, "#")
-		url := "https://github.com/" + repoOwner + "/" + repoName + "/pull/" + prNum
-		return "[#​" + prNum + "](" + url + ")"
+		url := "https://redirect.github.com/" + repoOwner + "/" + repoName + "/pull/" + prNum
+		return "[#&#8203;" + prNum + "](" + url + ")"
 	})
 	
 	body = userRe.ReplaceAllStringFunc(body, func(m string) string {
 		username := strings.TrimPrefix(m, "@")
-		url := "https://github.com/" + username
-		return "[@​" + username + "](" + url + ")"
+		url := "https://redirect.github.com/" + username
+		return "[@&#8203;" + username + "](" + url + ")"
 	})
 	
 	return body
