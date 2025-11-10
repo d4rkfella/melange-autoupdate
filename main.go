@@ -793,11 +793,20 @@ func sanitizeMentions(body, repoOwner, repoName string) string {
 		return "[#&#8203;" + prNum + "](" + url + ")"
 	})
 	
+	body = commitRe.ReplaceAllStringFunc(body, func(m string) string {
+		commitHash := m
+		url := "https://redirect.github.com/" + repoOwner + "/" + repoName + "/commit/" + commitHash
+		return "[`&#8203;" + commitHash + "`](" + url + ")"
+	})
+	
 	body = userRe.ReplaceAllStringFunc(body, func(m string) string {
 		username := strings.TrimPrefix(m, "@")
 		url := "https://redirect.github.com/" + username
 		return "[@&#8203;" + username + "](" + url + ")"
 	})
+	
+	body = strings.ReplaceAll(body, "https://github.com/", "https://redirect.github.com/")
+	body = strings.ReplaceAll(body, "http://github.com/", "http://redirect.github.com/")
 	
 	return body
 }
