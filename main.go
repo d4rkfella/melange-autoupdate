@@ -922,6 +922,6 @@ func main() {
 		}
 	}
 	runMelangeCommand(filePath, versionToUse, commitHash)
-	generatePRBody(owner, repo, currentVersion, newVersion, config.Package.Name)
+	generatePRBody(owner, repo, currentVersion, versionResult.Original, config.Package.Name)
 	writeOutput(versionToUse, config.Package.Name, true)
 }
