@@ -207,21 +207,6 @@ func parseGitHubRepo(repoURL string, expectedIdentifier string) (owner, repo str
 	return owner, repo, nil
 }
 
-func getGitCheckoutTag(version string, pipeline []PipelineStep) string {
-	for _, step := range pipeline {
-		if step.Uses == "git-checkout" {
-			if tagTemplate, ok := step.With["tag"].(string); ok && tagTemplate != "" {
-				prefix := strings.ReplaceAll(tagTemplate, "${{package.version}}", "")
-				if !strings.HasPrefix(version, prefix) {
-					return prefix + version
-				}
-				return version
-			}
-		}
-	}
-	return version
-}
-
 func fetchGitHubCommitHash(owner, repo, originalVersion string) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/tags/%s", owner, repo, originalVersion)
 	log.Printf("INFO: fetching GitHub ref for URL: %s", url)
@@ -797,7 +782,7 @@ func sanitizeMentions(body, repoOwner, repoName string) string {
 	body = commitRe.ReplaceAllStringFunc(body, func(m string) string {
 		commitHash := m
 		url := "https://redirect.github.com/" + repoOwner + "/" + repoName + "/commit/" + commitHash
-		return "[`&#8203;" + commitHash + "`](" + url + ")"
+		return "[&#8203;" + commitHash + "](" + url + ")"
 	})
 	
 	body = userRe.ReplaceAllStringFunc(body, func(m string) string {
@@ -928,11 +913,10 @@ func main() {
 	}
 
 	currentVersion := reconstructPackageVersion(&config)
-	newVersion := getGitCheckoutTag(versionResult.Original, config.Pipeline)
 	commitHash := ""
 
 	if expectedCommitNeeded {
-		commitHash, err = fetchGitHubCommitHash(owner, repo, newVersion)
+		commitHash, err = fetchGitHubCommitHash(owner, repo, versionResult.Original)
 		if err != nil {
 			log.Fatalf("ERROR: unable to fetch commit hash: %v", err)
 		}
