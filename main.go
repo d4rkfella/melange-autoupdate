@@ -48,7 +48,7 @@ type Environment struct {
 	Environment map[string]string `yaml:"environment"`
 }
 
-func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
 	type alias Config
 	var raw alias
 	if err := unmarshal(&raw); err != nil {
@@ -100,7 +100,7 @@ type Update struct {
 	VersionTransforms   []VersionTransform `yaml:"version-transform,omitempty"`
 }
 
-func (u *Update) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (u *Update) UnmarshalYAML(unmarshal func(any) error) error {
 	type alias Update
 	var raw struct {
 		Data                alias    `yaml:",inline"`
@@ -463,7 +463,7 @@ func getLatestGitHubVersion(update *Update, includePreReleases bool) (VersionRes
 	})
 
 	picked := all[len(all)-1]
-	log.Printf("INFO: selected latest version: %s", picked.Original)
+	log.Printf("INFO: latest version selected for comparison: %s (after processing: %s)", picked.Original, picked.Processed)
 
 	return VersionResult{
 		Original:  picked.Original,
