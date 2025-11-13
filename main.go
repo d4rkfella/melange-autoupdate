@@ -763,30 +763,81 @@ func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 		compare := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s", owner, repo, currentVersion, newVersion)
 		return nil, &compare
 	}
-	
-	body = sanitizeBody(body, owner, repo)
-	
+	body = sanitizeAndLinkify(body, owner, repo)
 	return &body, nil
 }
 
-func sanitizeBody(body, repoOwner, repoName string) string {
-	const zwsp = "&#8203;"
+func sanitizeAndLinkify(body, repoOwner, repoName string) string {
+	const zw = "&#8203;"
 
-	prRe := regexp.MustCompile(`(?m)(^|[^\w/])#(\d+)`)
-	body = prRe.ReplaceAllString(body, `${1}#`+zwsp+`${2}`)
+	htmlPlaceholders := make(map[string]string)
+	htmlCounter := 0
+	htmlBlockRe := regexp.MustCompile(`<(li|div|p|blockquote|pre)(?:\s[^>]*)?>[\s\S]*?</(?:li|div|p|blockquote|pre)>`)
 
-	userRe := regexp.MustCompile(`(^|[^\w])@([a-zA-Z0-9][a-zA-Z0-9-]+)(?!\.[a-z])`)
-	body = userRe.ReplaceAllString(body, `${1}@`+zwsp+`${2}`)
+	body = htmlBlockRe.ReplaceAllStringFunc(body, func(m string) string {
+		placeholder := fmt.Sprintf("__HTML_BLOCK_%d__", htmlCounter)
+		htmlPlaceholders[placeholder] = m
+		htmlCounter++
+		return placeholder
+	})
 
-	commitRe := regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
-	body = commitRe.ReplaceAllString(body, `${1}`+zwsp)
+	linkPlaceholders := make(map[string]string)
+	linkCounter := 0
+	linkRe := regexp.MustCompile(`\[[^\[\]]*\]\([^)]+\)`)
+
+	body = linkRe.ReplaceAllStringFunc(body, func(m string) string {
+		placeholder := fmt.Sprintf("__LINK_PLACEHOLDER_%d__", linkCounter)
+		linkPlaceholders[placeholder] = m
+		linkCounter++
+		return placeholder
+	})
+
+	plainPrRe := regexp.MustCompile(`#(\d+)`)
+	body = plainPrRe.ReplaceAllStringFunc(body, func(m string) string {
+		prNum := plainPrRe.FindStringSubmatch(m)[1]
+		return fmt.Sprintf("[#%s%s](https://redirect.github.com/%s/%s/pull/%s)",
+			zw, prNum, repoOwner, repoName, prNum)
+	})
+
+	plainUserRe := regexp.MustCompile(`@([a-zA-Z0-9][a-zA-Z0-9_-]*)`)
+	body = plainUserRe.ReplaceAllStringFunc(body, func(m string) string {
+		username := plainUserRe.FindStringSubmatch(m)[1]
+		return fmt.Sprintf("[@%s%s](https://redirect.github.com/%s)",
+			zw, username, username)
+	})
+
+	for placeholder, link := range linkPlaceholders {
+		link = regexp.MustCompile(`\[#(\d+)\]`).ReplaceAllStringFunc(link, func(m string) string {
+			prNum := regexp.MustCompile(`\[#(\d+)\]`).FindStringSubmatch(m)[1]
+			return fmt.Sprintf("[#%s%s]", zw, prNum)
+		})
+
+		link = regexp.MustCompile(`\[@([^\]]+)\]`).ReplaceAllStringFunc(link, func(m string) string {
+			username := regexp.MustCompile(`\[@([^\]]+)\]`).FindStringSubmatch(m)[1]
+			return fmt.Sprintf("[@%s%s]", zw, username)
+		})
+
+		body = strings.ReplaceAll(body, placeholder, link)
+	}
+
+	for placeholder, htmlBlock := range htmlPlaceholders {
+		htmlBlock = regexp.MustCompile(`>#(\d+)`).ReplaceAllStringFunc(htmlBlock, func(m string) string {
+			prNum := regexp.MustCompile(`>#(\d+)`).FindStringSubmatch(m)[1]
+			return fmt.Sprintf(">#%s%s", zw, prNum)
+		})
+
+		htmlBlock = regexp.MustCompile(`>@([a-zA-Z0-9][a-zA-Z0-9_-]*)`).ReplaceAllStringFunc(htmlBlock, func(m string) string {
+			username := regexp.MustCompile(`>@([a-zA-Z0-9][a-zA-Z0-9_-]*)`).FindStringSubmatch(m)[1]
+			return fmt.Sprintf(">@%s%s", zw, username)
+		})
+
+		body = strings.ReplaceAll(body, placeholder, htmlBlock)
+	}
 
 	body = strings.ReplaceAll(body, "https://github.com/", "https://redirect.github.com/")
-	body = strings.ReplaceAll(body, "http://github.com/", "http://redirect.github.com/")
 
 	return body
 }
-
 
 func runMelangeCommand(filePath, versionToUse, commitHash string) {
 
@@ -858,7 +909,7 @@ func main() {
 		if repoURL == "" {
 			log.Fatal("ERROR: git-checkout step does not have a defined repository")
 		}
-	
+
 		if config.Update.GitHub != nil {
 			owner, repo, err = parseGitHubRepo(repoURL, config.Update.GitHub.Identifier)
 			if err != nil {
