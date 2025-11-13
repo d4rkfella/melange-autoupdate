@@ -22,9 +22,6 @@ import (
 
 var (
 	numRe = regexp.MustCompile(`\d+`)
-	prRe   = regexp.MustCompile(`#(\d+)`)
-	userRe = regexp.MustCompile(`@([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?)`)
-	commitRe = regexp.MustCompile(`\b([a-f0-9]{7,40})\b`)
 )
 
 type VersionResult struct {
@@ -767,33 +764,26 @@ func generateReleaseNotesOrCompareURL(owner, repo, currentVersion, newVersion st
 		return nil, &compare
 	}
 	
-	body = sanitizeMentions(body, owner, repo)
+	body = sanitizeBody(body, owner, repo)
 	
 	return &body, nil
 }
 
-func sanitizeMentions(body, repoOwner, repoName string) string {
-	body = prRe.ReplaceAllStringFunc(body, func(m string) string {
-		prNum := strings.TrimPrefix(m, "#")
-		url := "https://redirect.github.com/" + repoOwner + "/" + repoName + "/pull/" + prNum
-		return "[#&#8203;" + prNum + "](" + url + ")"
-	})
-	
-	body = commitRe.ReplaceAllStringFunc(body, func(m string) string {
-		commitHash := m
-		url := "https://redirect.github.com/" + repoOwner + "/" + repoName + "/commit/" + commitHash
-		return "[&#8203;" + commitHash + "](" + url + ")"
-	})
-	
-	body = userRe.ReplaceAllStringFunc(body, func(m string) string {
-		username := strings.TrimPrefix(m, "@")
-		url := "https://redirect.github.com/" + username
-		return "[@&#8203;" + username + "](" + url + ")"
-	})
-	
+func sanitizeBody(body, repoOwner, repoName string) string {
+	const zwsp = "&#8203;"
+
+	prRe := regexp.MustCompile(`(?m)(^|[^\w/])#(\d+)`)
+	body = prRe.ReplaceAllString(body, `${1}#`+zwsp+`${2}`)
+
+	userRe := regexp.MustCompile(`(^|[^\w])@([a-zA-Z0-9][a-zA-Z0-9-]+)(?!\.[a-z])`)
+	body = userRe.ReplaceAllString(body, `${1}@`+zwsp+`${2}`)
+
+	commitRe := regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
+	body = commitRe.ReplaceAllString(body, `${1}`+zwsp)
+
 	body = strings.ReplaceAll(body, "https://github.com/", "https://redirect.github.com/")
 	body = strings.ReplaceAll(body, "http://github.com/", "http://redirect.github.com/")
-	
+
 	return body
 }
 
