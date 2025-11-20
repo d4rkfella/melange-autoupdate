@@ -1,4 +1,4 @@
-module github.com/melange-autoupdate
+module github.com/d4rkfella/melange-autoupdate/v2
 
 go 1.25.3
 
