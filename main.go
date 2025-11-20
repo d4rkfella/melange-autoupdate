@@ -347,9 +347,11 @@ func matchesAnyPattern(patterns []*regexp.Regexp, s string) bool {
 	return false
 }
 
-func applyVersionTransform(version string, t *VarTransform) string {
-	if t != nil && t.compiled != nil {
-		return t.compiled.ReplaceAllString(version, t.Replace)
+func applyVersionTransforms(version string, transforms []VersionTransform) string {
+	for _, t := range transforms {
+		if t.compiled != nil {
+			version = t.compiled.ReplaceAllString(version, t.Replace)
+		}
 	}
 	return version
 }
@@ -438,7 +440,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	versionToUse := applyVersionTransform(versionResult.Processed, config.VarTransform)
+	versionToUse := applyVersionTransforms(versionResult.Processed, config.Update.VersionTransforms)
 
 	if compareVersions(config.Package.Version, versionToUse) >= 0 {
 		log.Printf("INFO: package version already up to date.")
