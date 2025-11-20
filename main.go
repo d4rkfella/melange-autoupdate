@@ -267,6 +267,8 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 	)
+	opts, _ = launchChromiumWithFallback(opts...)
+
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
@@ -336,6 +338,27 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 	}
 
 	return VersionResult{}, fmt.Errorf("no valid versions found after filtering")
+}
+
+func launchChromiumWithFallback(opts ...chromedp.ExecAllocatorOption) ([]chromedp.ExecAllocatorOption, error) {
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	err := chromedp.Run(ctx, chromedp.Navigate("about:blank"))
+	if err == nil {
+		return opts, nil
+	}
+
+	log.Printf("WARNING: Chromium failed to start with sandbox: %v. Falling back to --no-sandbox.", err)
+
+	opts = append(opts, chromedp.Flag("no-sandbox", true))
+	return opts, nil
 }
 
 func matchesAnyPattern(patterns []*regexp.Regexp, s string) bool {
