@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,21 +24,109 @@ import (
 	"github.com/google/go-github/v79/github"
 )
 
-type VersionResult struct {
+type versionResult struct {
 	Version   string
 	CommitSHA string
 }
 
-type CompiledVersionTransform struct {
+type tagRef struct {
+	Name string
+	Hash plumbing.Hash
+}
+
+type compiledVersionTransform struct {
 	Re      *regexp.Regexp
 	Replace string
 }
 
-func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration) (VersionResult, error) {
+type versionCandidate struct {
+	Original  string
+	Processed string
+	ApkVer    apk.Version
+}
+
+type versionFilter interface {
+	GetFilterPrefix() string
+	GetFilterContains() string
+	GetStripPrefix() string
+	GetStripSuffix() string
+}
+
+func filterVersion(name string, filter versionFilter, compiledIgnore []*regexp.Regexp, logger *slog.Logger) bool {
+	if p := filter.GetFilterPrefix(); p != "" && !strings.HasPrefix(name, p) {
+		return true
+	}
+	if c := filter.GetFilterContains(); c != "" && !strings.Contains(name, c) {
+		return true
+	}
+
+	for _, re := range compiledIgnore {
+		if re.MatchString(name) {
+			logger.Debug("ignoring version", "version", name, "reason", "matched ignore pattern")
+			return true
+		}
+	}
+
+	return false
+}
+
+func transformVersion(name string, filter versionFilter, transforms []compiledVersionTransform) string {
+	processed := strings.TrimPrefix(name, filter.GetStripPrefix())
+	processed = strings.TrimSuffix(processed, filter.GetStripSuffix())
+
+	for _, t := range transforms {
+		processed = t.Re.ReplaceAllString(processed, t.Replace)
+	}
+
+	return processed
+}
+
+func findLatestValidVersion(
+	versions []string,
+	filter versionFilter,
+	compiledIgnore []*regexp.Regexp,
+	transforms []compiledVersionTransform,
+	logger *slog.Logger,
+) (*versionCandidate, error) {
+	var winner *versionCandidate
+
+	for _, verStr := range versions {
+		if filterVersion(verStr, filter, compiledIgnore, logger) {
+			continue
+		}
+
+		processed := transformVersion(verStr, filter, transforms)
+
+		ver, err := apk.ParseVersion(processed)
+		if err != nil {
+			logger.Info("skipping version, cannot parse as apk version",
+				"version", verStr,
+				"processed", processed,
+				"error", err)
+			continue
+		}
+
+		if winner == nil || apk.CompareVersions(ver, winner.ApkVer) > 0 {
+			winner = &versionCandidate{
+				Original:  verStr,
+				Processed: processed,
+				ApkVer:    ver,
+			}
+		}
+	}
+
+	if winner == nil {
+		return nil, fmt.Errorf("no valid versions found after filtering and parsing")
+	}
+
+	return winner, nil
+}
+
+func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration, melangeTransforms []compiledVersionTransform) (versionResult, error) {
 	gh := cfg.Update.GitHubMonitor
 	parts := strings.Split(gh.Identifier, "/")
 	if len(parts) != 2 {
-		return VersionResult{}, fmt.Errorf("invalid GitHub identifier: %s", gh.Identifier)
+		return versionResult{}, fmt.Errorf("invalid GitHub identifier: %s", gh.Identifier)
 	}
 	owner, repo := parts[0], parts[1]
 
@@ -53,47 +139,64 @@ func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *confi
 
 	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
 	if err != nil {
-		return VersionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
+		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
+	}
+
+	resolveSHA := func(tagName string) (string, error) {
+		ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+tagName)
+		if err != nil {
+			return "", fmt.Errorf("fetching ref for tag %s: %w", tagName, err)
+		}
+		if ref.Object == nil {
+			return "", fmt.Errorf("ref object missing for tag %s", tagName)
+		}
+
+		switch ref.Object.GetType() {
+		case "commit":
+			return ref.Object.GetSHA(), nil
+		case "tag":
+			tagObj, _, err := client.Git.GetTag(ctx, owner, repo, ref.Object.GetSHA())
+			if err != nil {
+				return "", fmt.Errorf("resolving annotated tag %s: %w", tagName, err)
+			}
+			if tagObj.Object != nil {
+				return tagObj.Object.GetSHA(), nil
+			}
+		}
+
+		return "", fmt.Errorf("unable to resolve SHA for tag %s", tagName)
+	}
+
+	processTags := func(tags []string) (*versionCandidate, error) {
+		return findLatestValidVersion(tags, gh, compiledIgnore, melangeTransforms, logger)
+	}
+
+	fetchAndReturn := func(winner *versionCandidate) (versionResult, error) {
+		sha, err := resolveSHA(winner.Original)
+		if err != nil {
+			return versionResult{}, err
+		}
+		return versionResult{
+			Version:   winner.Processed,
+			CommitSHA: sha,
+		}, nil
 	}
 
 	if gh.UseTags {
 		for {
 			tags, resp, err := client.Repositories.ListTags(ctx, owner, repo, opts)
 			if err != nil {
-				return VersionResult{}, fmt.Errorf("fetching tags for %s/%s: %w", owner, repo, err)
+				return versionResult{}, fmt.Errorf("listing tags: %w", err)
 			}
 
-			for _, tag := range tags {
-				tagName := tag.GetName()
+			tagNames := make([]string, len(tags))
+			for i := range tags {
+				tagNames[i] = tags[i].GetName()
+			}
 
-				if gh.GetFilterPrefix() != "" && !strings.HasPrefix(tagName, gh.GetFilterPrefix()) {
-					continue
-				}
-				if gh.GetFilterContains() != "" && !strings.Contains(tagName, gh.GetFilterContains()) {
-					continue
-				}
-				if matchesAnyPattern(compiledIgnore, tagName) {
-					logger.Info("ignoring version", "version", tagName, "reason", "matched ignore pattern")
-					continue
-				}
-
-				processed := strings.TrimPrefix(tagName, gh.GetStripPrefix())
-				processed = strings.TrimSuffix(processed, gh.GetStripSuffix())
-
-				sha := ""
-				if tag.Commit != nil {
-					sha = tag.Commit.GetSHA()
-				} else {
-					ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+tagName)
-					if err == nil && ref.Object != nil {
-						sha = ref.Object.GetSHA()
-					}
-				}
-
-				return VersionResult{
-					Version:   processed,
-					CommitSHA: sha,
-				}, nil
+			winner, err := processTags(tagNames)
+			if err == nil && winner != nil {
+				return fetchAndReturn(winner)
 			}
 
 			if resp.NextPage == 0 {
@@ -101,56 +204,40 @@ func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *confi
 			}
 			opts.Page = resp.NextPage
 		}
-	} else {
-		for {
-			releases, resp, err := client.Repositories.ListReleases(ctx, owner, repo, opts)
-			if err != nil {
-				return VersionResult{}, fmt.Errorf("fetching releases for %s/%s: %w", owner, repo, err)
-			}
 
-			for _, release := range releases {
-				tagName := release.GetTagName()
-				if !cfg.Update.EnablePreReleaseTags && release.GetPrerelease() {
-					continue
-				}
-				if gh.GetFilterPrefix() != "" && !strings.HasPrefix(tagName, gh.GetFilterPrefix()) {
-					continue
-				}
-				if gh.GetFilterContains() != "" && !strings.Contains(tagName, gh.GetFilterContains()) {
-					continue
-				}
-				if matchesAnyPattern(compiledIgnore, tagName) {
-					logger.Info("ignoring version", "version", tagName, "reason", "matched ignore pattern")
-					continue
-				}
-
-				processed := strings.TrimPrefix(tagName, gh.GetStripPrefix())
-				processed = strings.TrimSuffix(processed, gh.GetStripSuffix())
-
-				sha := ""
-				ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+tagName)
-				if err == nil && ref.Object != nil {
-					sha = ref.Object.GetSHA()
-				}
-
-				return VersionResult{
-					Version:   processed,
-					CommitSHA: sha,
-				}, nil
-			}
-
-			if resp.NextPage == 0 {
-				break
-			}
-			opts.Page = resp.NextPage
-		}
+		return versionResult{}, fmt.Errorf("no valid tags found for %s/%s", owner, repo)
 	}
 
-	return VersionResult{}, fmt.Errorf("no valid versions found after filtering for %s/%s", owner, repo)
+	for {
+		releases, resp, err := client.Repositories.ListReleases(ctx, owner, repo, opts)
+		if err != nil {
+			return versionResult{}, fmt.Errorf("listing releases: %w", err)
+		}
+
+		tagNames := make([]string, 0, len(releases))
+		for _, r := range releases {
+			if !cfg.Update.EnablePreReleaseTags && r.GetPrerelease() {
+				continue
+			}
+			tagNames = append(tagNames, r.GetTagName())
+		}
+
+		winner, err := processTags(tagNames)
+		if err == nil && winner != nil {
+			return fetchAndReturn(winner)
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return versionResult{}, fmt.Errorf("no versions found for %s/%s", owner, repo)
 }
 
-func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration) (VersionResult, error) {
-	git := cfg.Update.GitMonitor
+func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration, transforms []compiledVersionTransform) (versionResult, error) {
+	gitMonitor := cfg.Update.GitMonitor
 
 	repoURL := ""
 	for _, step := range cfg.Pipeline {
@@ -161,136 +248,82 @@ func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.C
 			}
 		}
 	}
-
 	if repoURL == "" {
-		return VersionResult{}, fmt.Errorf("no git-checkout step found in pipeline")
+		return versionResult{}, fmt.Errorf("no git-checkout step found in pipeline")
 	}
+	logger.Debug("using git repository", "repo", repoURL)
 
-	logger.Debug("using first git-checkout step for git provider", "repository", repoURL)
-
-	tags, err := gitListRemoteTags(ctx, repoURL)
-	if err != nil {
-		return VersionResult{}, fmt.Errorf("listing remote tags for %s: %w", repoURL, err)
-	}
-
-	if len(tags) == 0 {
-		return VersionResult{}, fmt.Errorf("no tags found in repository %s", repoURL)
-	}
-
-	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
-	if err != nil {
-		return VersionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
-	}
-
-	for _, tag := range tags {
-		tagName := tag.Name
-
-		if git.GetFilterPrefix() != "" && !strings.HasPrefix(tagName, git.GetFilterPrefix()) {
-			continue
-		}
-		if git.GetFilterContains() != "" && !strings.Contains(tagName, git.GetFilterContains()) {
-			continue
-		}
-		if matchesAnyPattern(compiledIgnore, tagName) {
-			logger.Info("ignoring version", "version", tagName, "reason", "matched ignore pattern")
-			continue
-		}
-
-		processed := strings.TrimPrefix(tagName, git.GetStripPrefix())
-		processed = strings.TrimSuffix(processed, git.GetStripSuffix())
-
-		return VersionResult{
-			Version:   processed,
-			CommitSHA: tag.SHA,
-		}, nil
-	}
-
-	return VersionResult{}, fmt.Errorf("no valid versions found after filtering for %s", repoURL)
-}
-
-func gitListRemoteTags(ctx context.Context, repoURL string) ([]struct {
-	Name string
-	SHA  string
-}, error) {
 	storage := memory.NewStorage()
-
 	rem := git.NewRemote(storage, &gitconfig.RemoteConfig{
 		Name: "origin",
 		URLs: []string{repoURL},
 	})
 
-	err := rem.FetchContext(ctx, &git.FetchOptions{
-		RefSpecs: []gitconfig.RefSpec{"refs/tags/*:refs/tags/*"},
-		Depth:    1, // minimize transfer
-	})
-	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return nil, fmt.Errorf("fetching tags: %w", err)
-	}
-
-	refs, err := storage.IterReferences()
+	refs, err := rem.ListContext(ctx, &git.ListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("iter refs: %w", err)
+		return versionResult{}, fmt.Errorf("listing remote refs: %w", err)
 	}
 
-	type tagWithTime struct {
-		Name string
-		SHA  string
-		Time time.Time
+	var rawTags []tagRef
+	for _, ref := range refs {
+		if ref.Name().IsTag() {
+			rawTags = append(rawTags, tagRef{
+				Name: ref.Name().Short(),
+				Hash: ref.Hash(),
+			})
+			logger.Debug("full tag reference", "ref", fmt.Sprintf("%#v", ref))
+		}
+	}
+	if len(rawTags) == 0 {
+		return versionResult{}, fmt.Errorf("no tags found in repository %s", repoURL)
 	}
 
-	var tagsWithTime []tagWithTime
-
-	err = refs.ForEach(func(ref *plumbing.Reference) error {
-		if !ref.Name().IsTag() {
-			return nil
-		}
-
-		name := ref.Name().Short()
-		sha := ref.Hash()
-
-		var when time.Time
-
-		if tagObj, err := object.GetTag(storage, sha); err == nil {
-			when = tagObj.Tagger.When
-		} else if commitObj, err := object.GetCommit(storage, sha); err == nil {
-			when = commitObj.Committer.When
-		}
-
-		tagsWithTime = append(tagsWithTime, tagWithTime{
-			Name: name,
-			SHA:  sha.String(),
-			Time: when,
-		})
-
-		return nil
-	})
+	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
 	if err != nil {
-		return nil, err
+		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
 	}
 
-	sort.Slice(tagsWithTime, func(i, j int) bool {
-		return tagsWithTime[i].Time.After(tagsWithTime[j].Time)
-	})
+	tagNames := make([]string, len(rawTags))
+	tagHashMap := make(map[string]plumbing.Hash)
+	for i, t := range rawTags {
+		tagNames[i] = t.Name
+		tagHashMap[t.Name] = t.Hash
+	}
 
-	out := make([]struct {
-		Name string
-		SHA  string
-	}, len(tagsWithTime))
+	winner, err := findLatestValidVersion(tagNames, gitMonitor, compiledIgnore, transforms, logger)
+	if err != nil {
+		return versionResult{}, err
+	}
 
-	for i, t := range tagsWithTime {
-		out[i] = struct {
-			Name string
-			SHA  string
-		}{
-			Name: t.Name,
-			SHA:  t.SHA,
+	refSpec := gitconfig.RefSpec(fmt.Sprintf("refs/tags/%s:refs/tags/%s", winner.Original, winner.Original))
+	if err := rem.FetchContext(ctx, &git.FetchOptions{
+		RefSpecs: []gitconfig.RefSpec{refSpec},
+		Depth:    1,
+	}); err != nil && err != git.NoErrAlreadyUpToDate {
+		return versionResult{}, fmt.Errorf("fetching tag %s: %w", winner.Original, err)
+	}
+
+	winnerHash := tagHashMap[winner.Original]
+	commitSHA := ""
+	if tagObj, err := object.GetTag(storage, winnerHash); err == nil {
+		if commitObj, err := object.GetCommit(storage, tagObj.Target); err == nil {
+			commitSHA = commitObj.Hash.String()
 		}
+	} else if commitObj, err := object.GetCommit(storage, winnerHash); err == nil {
+		commitSHA = commitObj.Hash.String()
 	}
 
-	return out, nil
+	if commitSHA == "" {
+		return versionResult{}, fmt.Errorf("failed to resolve commit for tag %s", winner.Original)
+	}
+
+	return versionResult{
+		Version:   winner.Processed,
+		CommitSHA: commitSHA,
+	}, nil
 }
 
-func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration) (VersionResult, error) {
+func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration, transforms []compiledVersionTransform) (versionResult, error) {
 	rm := cfg.Update.ReleaseMonitor
 	url := fmt.Sprintf("https://release-monitoring.org/api/v2/versions/?project_id=%d", rm.Identifier)
 
@@ -304,7 +337,7 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	)
 	opts, err := testChromiumSandboxing(ctx, logger, opts...)
 	if err != nil {
-		return VersionResult{}, err
+		return versionResult{}, err
 	}
 
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
@@ -323,16 +356,14 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	}
 
 	var jsonBody string
-
-	err = chromedp.Run(chromeCtx,
+	if err := chromedp.Run(chromeCtx,
 		network.Enable(),
 		network.SetExtraHTTPHeaders(network.Headers(headers)),
 		chromedp.Navigate(url),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Evaluate(`document.body.innerText`, &jsonBody),
-	)
-	if err != nil {
-		return VersionResult{}, fmt.Errorf("failed to fetch project info from release-monitoring.org: %w", err)
+	); err != nil {
+		return versionResult{}, fmt.Errorf("failed to fetch project info from release-monitoring.org: %w", err)
 	}
 
 	var project struct {
@@ -342,8 +373,8 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	}
 
 	if err := json.Unmarshal([]byte(jsonBody), &project); err != nil {
-		logger.Debug("json decode failed", "error", err, "response_preview", truncateString(jsonBody, 200))
-		return VersionResult{}, fmt.Errorf("failed to decode response body: %w", err)
+		logger.Debug("previewing response", "response_preview", truncateString(jsonBody, 200))
+		return versionResult{}, fmt.Errorf("failed to decode response body: %w", err)
 	}
 
 	var versions []string
@@ -354,36 +385,23 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	}
 
 	if len(versions) == 0 {
-		return VersionResult{}, fmt.Errorf("no versions found in response from release-monitoring.org")
+		return versionResult{}, fmt.Errorf("no versions found in response from release-monitoring.org")
 	}
 
 	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
 	if err != nil {
-		return VersionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
+		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
 	}
 
-	for _, version := range versions {
-		if rm.GetFilterPrefix() != "" && !strings.HasPrefix(version, rm.GetFilterPrefix()) {
-			continue
-		}
-		if rm.GetFilterContains() != "" && !strings.Contains(version, rm.GetFilterContains()) {
-			continue
-		}
-		if matchesAnyPattern(compiledIgnore, version) {
-			logger.Info("ignoring version", "version", version, "reason", "matched ignore pattern")
-			continue
-		}
-
-		processed := strings.TrimPrefix(version, rm.GetStripPrefix())
-		processed = strings.TrimSuffix(processed, rm.GetStripSuffix())
-
-		return VersionResult{
-			Version:   processed,
-			CommitSHA: "",
-		}, nil
+	winner, err := findLatestValidVersion(versions, rm, compiledIgnore, transforms, logger)
+	if err != nil {
+		return versionResult{}, err
 	}
 
-	return VersionResult{}, fmt.Errorf("no valid versions found after filtering")
+	return versionResult{
+		Version:   winner.Processed,
+		CommitSHA: "",
+	}, nil
 }
 
 func testChromiumSandboxing(ctx context.Context, logger *slog.Logger, opts ...chromedp.ExecAllocatorOption) ([]chromedp.ExecAllocatorOption, error) {
@@ -423,15 +441,6 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "... (truncated)"
 }
 
-func matchesAnyPattern(patterns []*regexp.Regexp, s string) bool {
-	for _, re := range patterns {
-		if re.MatchString(s) {
-			return true
-		}
-	}
-	return false
-}
-
 func compileIgnorePatterns(patterns []string) ([]*regexp.Regexp, error) {
 	compiled := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
@@ -444,26 +453,19 @@ func compileIgnorePatterns(patterns []string) ([]*regexp.Regexp, error) {
 	return compiled, nil
 }
 
-func compileVersionTransforms(vts []config.VersionTransform) ([]CompiledVersionTransform, error) {
-	out := make([]CompiledVersionTransform, 0, len(vts))
+func compileVersionTransforms(vts []config.VersionTransform) ([]compiledVersionTransform, error) {
+	out := make([]compiledVersionTransform, 0, len(vts))
 	for _, t := range vts {
 		re, err := regexp.Compile(t.Match)
 		if err != nil {
 			return nil, fmt.Errorf("invalid version transform regex %q: %w", t.Match, err)
 		}
-		out = append(out, CompiledVersionTransform{
+		out = append(out, compiledVersionTransform{
 			Re:      re,
 			Replace: t.Replace,
 		})
 	}
 	return out, nil
-}
-
-func applyCompiledVersionTransforms(version string, transforms []CompiledVersionTransform) string {
-	for _, t := range transforms {
-		version = t.Re.ReplaceAllString(version, t.Replace)
-	}
-	return version
 }
 
 func compareVersions(logger *slog.Logger, currentStr, latestStr string) int {
@@ -556,13 +558,13 @@ func run(ctx context.Context, logger *slog.Logger, filePath string) error {
 		return fmt.Errorf("compiling version transforms: %w", err)
 	}
 
-	var versionResult VersionResult
+	var versionResult versionResult
 	if cfg.Update.GitHubMonitor != nil {
-		versionResult, err = getLatestGitHubVersion(ctx, logger, cfg)
+		versionResult, err = getLatestGitHubVersion(ctx, logger, cfg, compiledTransforms)
 	} else if cfg.Update.ReleaseMonitor != nil {
-		versionResult, err = getLatestReleaseMonitorVersion(ctx, logger, cfg)
+		versionResult, err = getLatestReleaseMonitorVersion(ctx, logger, cfg, compiledTransforms)
 	} else if cfg.Update.GitMonitor != nil {
-		versionResult, err = getLatestGitVersion(ctx, logger, cfg)
+		versionResult, err = getLatestGitVersion(ctx, logger, cfg, compiledTransforms)
 	} else {
 		return fmt.Errorf("update provider not implemented")
 	}
@@ -570,31 +572,29 @@ func run(ctx context.Context, logger *slog.Logger, filePath string) error {
 		return fmt.Errorf("fetching latest version: %w", err)
 	}
 
-	versionToUse := applyCompiledVersionTransforms(versionResult.Version, compiledTransforms)
-
-	if compareVersions(logger, cfg.Package.Version, versionToUse) >= 0 {
+	if compareVersions(logger, cfg.Package.Version, versionResult.Version) >= 0 {
 		logger.Info("package version already up to date",
 			"current", cfg.Package.Version,
-			"latest", versionToUse)
+			"latest", versionResult.Version)
 		return nil
 	}
 
 	logger.Info("updating package",
 		"package", cfg.Package.Name,
 		"from", cfg.Package.Version,
-		"to", versionToUse)
+		"to", versionResult.Version)
 
-	if err := bumpConfig(ctx, filePath, versionToUse, versionResult.CommitSHA); err != nil {
+	if err := bumpConfig(ctx, filePath, versionResult.Version, versionResult.CommitSHA); err != nil {
 		return fmt.Errorf("bumping config: %w", err)
 	}
 
-	if err := writeOutput(logger, versionToUse, cfg.Package.Name); err != nil {
+	if err := writeOutput(logger, versionResult.Version, cfg.Package.Name); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
 
 	logger.Info("successfully updated package",
 		"package", cfg.Package.Name,
-		"version", versionToUse)
+		"version", versionResult.Version)
 
 	return nil
 }
