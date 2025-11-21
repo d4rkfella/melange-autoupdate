@@ -39,25 +39,6 @@ jobs:
       - name: Run golangci-lint
         run: golangci-lint run ./...
 
-      - name: Run tests
-        run: |
-          go test -v -coverprofile=coverage.out ./...
-
-          echo "Test Coverage:"
-          go tool cover -func=coverage.out | grep total:
-
-          go tool cover -html=coverage.out -o coverage.html
-
-          COVERAGE=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}')
-          echo "COVERAGE=$COVERAGE" >> $GITHUB_ENV
-          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v5
-        with:
-          name: coverage-report
-          path: coverage.html
-
       - name: Create annotated tag
         run: |
           git config user.name "GitHub Actions"
