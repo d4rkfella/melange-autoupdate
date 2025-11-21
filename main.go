@@ -302,9 +302,9 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
 	)
-	opts, err := launchChromiumWithFallback(ctx, logger, opts...)
+	opts, err := testChromiumSandboxing(ctx, logger, opts...)
 	if err != nil {
-		return VersionResult{}, fmt.Errorf("failed to launch Chrome/Chromium: %w", err)
+		return VersionResult{}, err
 	}
 
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
@@ -386,7 +386,7 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	return VersionResult{}, fmt.Errorf("no valid versions found after filtering")
 }
 
-func launchChromiumWithFallback(ctx context.Context, logger *slog.Logger, opts ...chromedp.ExecAllocatorOption) ([]chromedp.ExecAllocatorOption, error) {
+func testChromiumSandboxing(ctx context.Context, logger *slog.Logger, opts ...chromedp.ExecAllocatorOption) ([]chromedp.ExecAllocatorOption, error) {
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer cancel()
 	testCtx, cancel := chromedp.NewContext(allocCtx)
@@ -407,23 +407,11 @@ func launchChromiumWithFallback(ctx context.Context, logger *slog.Logger, opts .
 		strings.Contains(errStr, "permission denied")
 
 	if !isSandboxError {
-		return nil, fmt.Errorf("chromium launch failed: %w", err)
+		return nil, err
 	}
 
-	logger.Warn("chromium failed to start with sandbox, falling back to --no-sandbox", "error", err)
+	logger.Warn("Chromium could not start with sandbox, likely due to CI/container restrictions; using --no-sandbox as fallback")
 	opts = append(opts, chromedp.Flag("no-sandbox", true))
-
-	allocCtx2, cancel2 := chromedp.NewExecAllocator(ctx, opts...)
-	defer cancel2()
-	testCtx2, cancel2 := chromedp.NewContext(allocCtx2)
-	defer cancel2()
-	testCtx2, cancel2 = context.WithTimeout(testCtx2, 5*time.Second)
-	defer cancel2()
-
-	err = chromedp.Run(testCtx2, chromedp.Navigate("about:blank"))
-	if err != nil {
-		return nil, fmt.Errorf("chromium launch failed even with --no-sandbox: %w", err)
-	}
 
 	return opts, nil
 }
