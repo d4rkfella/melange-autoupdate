@@ -3,161 +3,47 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
-	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/apk"
+	"chainguard.dev/melange/pkg/config"
+	"chainguard.dev/melange/pkg/renovate"
+	"chainguard.dev/melange/pkg/renovate/bump"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+	"github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v79/github"
-	"go.yaml.in/yaml/v4"
 )
 
 type VersionResult struct {
-	Original  string
-	Processed string
+	Version   string
 	CommitSHA string
 }
 
-type Config struct {
-	Package      Package       `yaml:"package"`
-	Update       Update        `yaml:"update"`
-	VarTransform *VarTransform `yaml:"var-transforms,omitempty"`
+type CompiledVersionTransform struct {
+	Re      *regexp.Regexp
+	Replace string
 }
 
-type Package struct {
-	Name    string `yaml:"name"`
-	Version string `yaml:"version"`
-	Epoch   *int   `yaml:"epoch"`
-}
-
-type VersionTransform struct {
-	Match    string         `yaml:"match"`
-	Replace  string         `yaml:"replace"`
-	compiled *regexp.Regexp `yaml:"-"`
-}
-
-type VarTransform struct {
-	From     string         `yaml:"from"`
-	Match    string         `yaml:"match"`
-	Replace  string         `yaml:"replace"`
-	To       string         `yaml:"to"`
-	compiled *regexp.Regexp `yaml:"-"`
-}
-
-type Update struct {
-	Enabled             bool               `yaml:"enabled"`
-	Manual              bool               `yaml:"manual"`
-	Shared              bool               `yaml:"shared"`
-	RequireSequential   bool               `yaml:"require-sequential"`
-	ReleaseMonitor      *ReleaseMonitor    `yaml:"release-monitor,omitempty"`
-	GitHub              *GitHub            `yaml:"github,omitempty"`
-	Git                 *Git               `yaml:"git,omitempty"`
-	IgnoreRegexPatterns []*regexp.Regexp   `yaml:"-"`
-	VersionTransforms   []VersionTransform `yaml:"version-transform,omitempty"`
-}
-
-func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
-	type rawConfig struct {
-		Package       Package        `yaml:"package"`
-		Update        Update         `yaml:"update"`
-		VarTransforms []VarTransform `yaml:"var-transforms,omitempty"`
-	}
-
-	var raw rawConfig
-	if err := unmarshal(&raw); err != nil {
-		return err
-	}
-
-	c.Package = raw.Package
-	c.Update = raw.Update
-
-	for _, vt := range raw.VarTransforms {
-		if vt.To == "mangled-package-version" {
-			re, err := regexp.Compile(vt.Match)
-			if err != nil {
-				return fmt.Errorf("invalid var-transform regex %q: %w", vt.Match, err)
-			}
-			vt.compiled = re
-			c.VarTransform = &vt
-			break
-		}
-	}
-
-	return nil
-}
-
-func (u *Update) UnmarshalYAML(unmarshal func(any) error) error {
-	type alias Update
-	var raw struct {
-		Data                alias    `yaml:",inline"`
-		IgnoreRegexPatterns []string `yaml:"ignore-regex-patterns,omitempty"`
-	}
-
-	if err := unmarshal(&raw); err != nil {
-		return err
-	}
-
-	*u = Update(raw.Data)
-
-	for _, pattern := range raw.IgnoreRegexPatterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return fmt.Errorf("invalid ignore regex pattern %q: %w", pattern, err)
-		}
-		u.IgnoreRegexPatterns = append(u.IgnoreRegexPatterns, re)
-	}
-
-	for i := range u.VersionTransforms {
-		re, err := regexp.Compile(u.VersionTransforms[i].Match)
-		if err != nil {
-			return fmt.Errorf("invalid version transform regex %q: %w",
-				u.VersionTransforms[i].Match, err)
-		}
-		u.VersionTransforms[i].compiled = re
-	}
-
-	return nil
-}
-
-type ReleaseMonitor struct {
-	Identifier            int    `yaml:"identifier"`
-	StripPrefix           string `yaml:"strip-prefix,omitempty"`
-	StripSuffix           string `yaml:"strip-suffix,omitempty"`
-	VersionFilterPrefix   string `yaml:"version-filter-prefix,omitempty"`
-	VersionFilterContains string `yaml:"version-filter-contains,omitempty"`
-}
-
-type GitHub struct {
-	Identifier        string `yaml:"identifier"`
-	StripPrefix       string `yaml:"strip-prefix,omitempty"`
-	StripSuffix       string `yaml:"strip-suffix,omitempty"`
-	UseTag            bool   `yaml:"use-tag,omitempty"`
-	TagFilterPrefix   string `yaml:"tag-filter-prefix,omitempty"`
-	TagFilterContains string `yaml:"tag-filter-contains,omitempty"`
-}
-
-type Git struct {
-	TagFilterPrefix   string `yaml:"tag-filter-prefix,omitempty"`
-	StripPrefix       string `yaml:"strip-prefix,omitempty"`
-	StripSuffix       string `yaml:"strip-suffix,omitempty"`
-	TagFilterContains string `yaml:"tag-filter-contains,omitempty"`
-}
-
-func getLatestGitHubVersion(update *Update) (VersionResult, error) {
-	gh := update.GitHub
+func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration) (VersionResult, error) {
+	gh := cfg.Update.GitHubMonitor
 	parts := strings.Split(gh.Identifier, "/")
 	if len(parts) != 2 {
 		return VersionResult{}, fmt.Errorf("invalid GitHub identifier: %s", gh.Identifier)
 	}
 	owner, repo := parts[0], parts[1]
 
-	ctx := context.Background()
 	client := github.NewClient(nil)
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		client = client.WithAuthToken(token)
@@ -165,29 +51,34 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 
 	opts := &github.ListOptions{PerPage: 100}
 
-	if gh.UseTag {
+	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
+	if err != nil {
+		return VersionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
+	}
+
+	if gh.UseTags {
 		for {
 			tags, resp, err := client.Repositories.ListTags(ctx, owner, repo, opts)
 			if err != nil {
-				return VersionResult{}, fmt.Errorf("fetching tags: %w", err)
+				return VersionResult{}, fmt.Errorf("fetching tags for %s/%s: %w", owner, repo, err)
 			}
 
 			for _, tag := range tags {
 				tagName := tag.GetName()
 
-				if gh.TagFilterPrefix != "" && !strings.HasPrefix(tagName, gh.TagFilterPrefix) {
+				if gh.GetFilterPrefix() != "" && !strings.HasPrefix(tagName, gh.GetFilterPrefix()) {
 					continue
 				}
-				if gh.TagFilterContains != "" && !strings.Contains(tagName, gh.TagFilterContains) {
+				if gh.GetFilterContains() != "" && !strings.Contains(tagName, gh.GetFilterContains()) {
 					continue
 				}
-				if matchesAnyPattern(update.IgnoreRegexPatterns, tagName) {
-					log.Printf("INFO: ignoring version %q (matched ignore pattern)", tagName)
+				if matchesAnyPattern(compiledIgnore, tagName) {
+					logger.Info("ignoring version", "version", tagName, "reason", "matched ignore pattern")
 					continue
 				}
 
-				processed := strings.TrimPrefix(tagName, gh.StripPrefix)
-				processed = strings.TrimSuffix(processed, gh.StripSuffix)
+				processed := strings.TrimPrefix(tagName, gh.GetStripPrefix())
+				processed = strings.TrimSuffix(processed, gh.GetStripSuffix())
 
 				sha := ""
 				if tag.Commit != nil {
@@ -200,8 +91,7 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 				}
 
 				return VersionResult{
-					Original:  tagName,
-					Processed: processed,
+					Version:   processed,
 					CommitSHA: sha,
 				}, nil
 			}
@@ -215,26 +105,27 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 		for {
 			releases, resp, err := client.Repositories.ListReleases(ctx, owner, repo, opts)
 			if err != nil {
-				return VersionResult{}, fmt.Errorf("fetching releases: %w", err)
+				return VersionResult{}, fmt.Errorf("fetching releases for %s/%s: %w", owner, repo, err)
 			}
 
 			for _, release := range releases {
-
 				tagName := release.GetTagName()
+				if !cfg.Update.EnablePreReleaseTags && release.GetPrerelease() {
+					continue
+				}
+				if gh.GetFilterPrefix() != "" && !strings.HasPrefix(tagName, gh.GetFilterPrefix()) {
+					continue
+				}
+				if gh.GetFilterContains() != "" && !strings.Contains(tagName, gh.GetFilterContains()) {
+					continue
+				}
+				if matchesAnyPattern(compiledIgnore, tagName) {
+					logger.Info("ignoring version", "version", tagName, "reason", "matched ignore pattern")
+					continue
+				}
 
-				if gh.TagFilterPrefix != "" && !strings.HasPrefix(tagName, gh.TagFilterPrefix) {
-					continue
-				}
-				if gh.TagFilterContains != "" && !strings.Contains(tagName, gh.TagFilterContains) {
-					continue
-				}
-				if matchesAnyPattern(update.IgnoreRegexPatterns, tagName) {
-					log.Printf("INFO: ignoring version %q (matched ignore pattern)", tagName)
-					continue
-				}
-
-				processed := strings.TrimPrefix(tagName, gh.StripPrefix)
-				processed = strings.TrimSuffix(processed, gh.StripSuffix)
+				processed := strings.TrimPrefix(tagName, gh.GetStripPrefix())
+				processed = strings.TrimSuffix(processed, gh.GetStripSuffix())
 
 				sha := ""
 				ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+tagName)
@@ -243,8 +134,7 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 				}
 
 				return VersionResult{
-					Original:  tagName,
-					Processed: processed,
+					Version:   processed,
 					CommitSHA: sha,
 				}, nil
 			}
@@ -256,26 +146,174 @@ func getLatestGitHubVersion(update *Update) (VersionResult, error) {
 		}
 	}
 
-	return VersionResult{}, fmt.Errorf("no valid versions found after filtering")
+	return VersionResult{}, fmt.Errorf("no valid versions found after filtering for %s/%s", owner, repo)
 }
 
-func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
-	rm := update.ReleaseMonitor
+func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration) (VersionResult, error) {
+	git := cfg.Update.GitMonitor
+
+	repoURL := ""
+	for _, step := range cfg.Pipeline {
+		if step.Uses == "git-checkout" {
+			if repo := step.With["repository"]; repo != "" {
+				repoURL = repo
+				break
+			}
+		}
+	}
+
+	if repoURL == "" {
+		return VersionResult{}, fmt.Errorf("no git-checkout step found in pipeline")
+	}
+
+	logger.Debug("using first git-checkout step for git provider", "repository", repoURL)
+
+	tags, err := gitListRemoteTags(ctx, repoURL)
+	if err != nil {
+		return VersionResult{}, fmt.Errorf("listing remote tags for %s: %w", repoURL, err)
+	}
+
+	if len(tags) == 0 {
+		return VersionResult{}, fmt.Errorf("no tags found in repository %s", repoURL)
+	}
+
+	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
+	if err != nil {
+		return VersionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
+	}
+
+	for _, tag := range tags {
+		tagName := tag.Name
+
+		if git.GetFilterPrefix() != "" && !strings.HasPrefix(tagName, git.GetFilterPrefix()) {
+			continue
+		}
+		if git.GetFilterContains() != "" && !strings.Contains(tagName, git.GetFilterContains()) {
+			continue
+		}
+		if matchesAnyPattern(compiledIgnore, tagName) {
+			logger.Info("ignoring version", "version", tagName, "reason", "matched ignore pattern")
+			continue
+		}
+
+		processed := strings.TrimPrefix(tagName, git.GetStripPrefix())
+		processed = strings.TrimSuffix(processed, git.GetStripSuffix())
+
+		return VersionResult{
+			Version:   processed,
+			CommitSHA: tag.SHA,
+		}, nil
+	}
+
+	return VersionResult{}, fmt.Errorf("no valid versions found after filtering for %s", repoURL)
+}
+
+func gitListRemoteTags(ctx context.Context, repoURL string) ([]struct {
+	Name string
+	SHA  string
+}, error) {
+	storage := memory.NewStorage()
+
+	rem := git.NewRemote(storage, &gitconfig.RemoteConfig{
+		Name: "origin",
+		URLs: []string{repoURL},
+	})
+
+	err := rem.FetchContext(ctx, &git.FetchOptions{
+		RefSpecs: []gitconfig.RefSpec{"refs/tags/*:refs/tags/*"},
+		Depth:    1, // minimize transfer
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return nil, fmt.Errorf("fetching tags: %w", err)
+	}
+
+	refs, err := storage.IterReferences()
+	if err != nil {
+		return nil, fmt.Errorf("iter refs: %w", err)
+	}
+
+	type tagWithTime struct {
+		Name string
+		SHA  string
+		Time time.Time
+	}
+
+	var tagsWithTime []tagWithTime
+
+	err = refs.ForEach(func(ref *plumbing.Reference) error {
+		if !ref.Name().IsTag() {
+			return nil
+		}
+
+		name := ref.Name().Short()
+		sha := ref.Hash()
+
+		var when time.Time
+
+		if tagObj, err := object.GetTag(storage, sha); err == nil {
+			when = tagObj.Tagger.When
+		} else if commitObj, err := object.GetCommit(storage, sha); err == nil {
+			when = commitObj.Committer.When
+		}
+
+		tagsWithTime = append(tagsWithTime, tagWithTime{
+			Name: name,
+			SHA:  sha.String(),
+			Time: when,
+		})
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(tagsWithTime, func(i, j int) bool {
+		return tagsWithTime[i].Time.After(tagsWithTime[j].Time)
+	})
+
+	out := make([]struct {
+		Name string
+		SHA  string
+	}, len(tagsWithTime))
+
+	for i, t := range tagsWithTime {
+		out[i] = struct {
+			Name string
+			SHA  string
+		}{
+			Name: t.Name,
+			SHA:  t.SHA,
+		}
+	}
+
+	return out, nil
+}
+
+func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration) (VersionResult, error) {
+	rm := cfg.Update.ReleaseMonitor
 	url := fmt.Sprintf("https://release-monitoring.org/api/v2/versions/?project_id=%d", rm.Identifier)
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-extensions", true),
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
 	)
-	opts, _ = launchChromiumWithFallback(opts...)
+	opts, err := launchChromiumWithFallback(ctx, logger, opts...)
+	if err != nil {
+		return VersionResult{}, fmt.Errorf("failed to launch Chrome/Chromium: %w", err)
+	}
 
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer cancel()
 
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	chromeCtx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+	chromeCtx, cancel = context.WithTimeout(chromeCtx, 15*time.Second)
 	defer cancel()
 
 	token := os.Getenv("RELEASE_MONITOR_TOKEN")
@@ -286,16 +324,15 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 
 	var jsonBody string
 
-	err := chromedp.Run(ctx,
+	err = chromedp.Run(chromeCtx,
 		network.Enable(),
 		network.SetExtraHTTPHeaders(network.Headers(headers)),
-
 		chromedp.Navigate(url),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Evaluate(`document.body.innerText`, &jsonBody),
 	)
 	if err != nil {
-		return VersionResult{}, fmt.Errorf("failed to fetch project info: %w", err)
+		return VersionResult{}, fmt.Errorf("failed to fetch project info from release-monitoring.org: %w", err)
 	}
 
 	var project struct {
@@ -305,34 +342,43 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 	}
 
 	if err := json.Unmarshal([]byte(jsonBody), &project); err != nil {
-		log.Printf("DEBUG: Response body: %s", jsonBody)
-		return VersionResult{}, fmt.Errorf("failed to decode project data: %w", err)
+		logger.Debug("json decode failed", "error", err, "response_preview", truncateString(jsonBody, 200))
+		return VersionResult{}, fmt.Errorf("failed to decode response body: %w", err)
 	}
 
-	versions := project.Versions
+	var versions []string
+	if !cfg.Update.EnablePreReleaseTags {
+		versions = project.StableVersions
+	} else {
+		versions = project.Versions
+	}
 
 	if len(versions) == 0 {
-		return VersionResult{}, fmt.Errorf("no versions found in response")
+		return VersionResult{}, fmt.Errorf("no versions found in response from release-monitoring.org")
+	}
+
+	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
+	if err != nil {
+		return VersionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
 	}
 
 	for _, version := range versions {
-		if rm.VersionFilterPrefix != "" && !strings.HasPrefix(version, rm.VersionFilterPrefix) {
+		if rm.GetFilterPrefix() != "" && !strings.HasPrefix(version, rm.GetFilterPrefix()) {
 			continue
 		}
-		if rm.VersionFilterContains != "" && !strings.Contains(version, rm.VersionFilterContains) {
+		if rm.GetFilterContains() != "" && !strings.Contains(version, rm.GetFilterContains()) {
 			continue
 		}
-		if matchesAnyPattern(update.IgnoreRegexPatterns, version) {
-			log.Printf("INFO: ignoring version %q (matched ignore pattern)", version)
+		if matchesAnyPattern(compiledIgnore, version) {
+			logger.Info("ignoring version", "version", version, "reason", "matched ignore pattern")
 			continue
 		}
 
-		processed := strings.TrimPrefix(version, rm.StripPrefix)
-		processed = strings.TrimSuffix(processed, rm.StripSuffix)
+		processed := strings.TrimPrefix(version, rm.GetStripPrefix())
+		processed = strings.TrimSuffix(processed, rm.GetStripSuffix())
 
 		return VersionResult{
-			Original:  version,
-			Processed: processed,
+			Version:   processed,
 			CommitSHA: "",
 		}, nil
 	}
@@ -340,25 +386,53 @@ func getLatestReleaseMonitorVersion(update *Update) (VersionResult, error) {
 	return VersionResult{}, fmt.Errorf("no valid versions found after filtering")
 }
 
-func launchChromiumWithFallback(opts ...chromedp.ExecAllocatorOption) ([]chromedp.ExecAllocatorOption, error) {
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+func launchChromiumWithFallback(ctx context.Context, logger *slog.Logger, opts ...chromedp.ExecAllocatorOption) ([]chromedp.ExecAllocatorOption, error) {
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
+	defer cancel()
+	testCtx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+	testCtx, cancel = context.WithTimeout(testCtx, 5*time.Second)
 	defer cancel()
 
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	err := chromedp.Run(ctx, chromedp.Navigate("about:blank"))
+	err := chromedp.Run(testCtx, chromedp.Navigate("about:blank"))
 	if err == nil {
 		return opts, nil
 	}
 
-	log.Printf("WARNING: Chromium failed to start with sandbox: %v. Falling back to --no-sandbox.", err)
+	errStr := err.Error()
+	isSandboxError := strings.Contains(errStr, "sandbox") ||
+		strings.Contains(errStr, "SUID") ||
+		strings.Contains(errStr, "namespace") ||
+		strings.Contains(errStr, "setuid") ||
+		strings.Contains(errStr, "permission denied")
 
+	if !isSandboxError {
+		return nil, fmt.Errorf("chromium launch failed: %w", err)
+	}
+
+	logger.Warn("chromium failed to start with sandbox, falling back to --no-sandbox", "error", err)
 	opts = append(opts, chromedp.Flag("no-sandbox", true))
+
+	allocCtx2, cancel2 := chromedp.NewExecAllocator(ctx, opts...)
+	defer cancel2()
+	testCtx2, cancel2 := chromedp.NewContext(allocCtx2)
+	defer cancel2()
+	testCtx2, cancel2 = context.WithTimeout(testCtx2, 5*time.Second)
+	defer cancel2()
+
+	err = chromedp.Run(testCtx2, chromedp.Navigate("about:blank"))
+	if err != nil {
+		return nil, fmt.Errorf("chromium launch failed even with --no-sandbox: %w", err)
+	}
+
 	return opts, nil
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "... (truncated)"
 }
 
 func matchesAnyPattern(patterns []*regexp.Regexp, s string) bool {
@@ -370,106 +444,190 @@ func matchesAnyPattern(patterns []*regexp.Regexp, s string) bool {
 	return false
 }
 
-func applyVersionTransforms(version string, transforms []VersionTransform) string {
-	for _, t := range transforms {
-		if t.compiled != nil {
-			version = t.compiled.ReplaceAllString(version, t.Replace)
+func compileIgnorePatterns(patterns []string) ([]*regexp.Regexp, error) {
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ignore pattern regex %q: %w", p, err)
 		}
+		compiled = append(compiled, re)
+	}
+	return compiled, nil
+}
+
+func compileVersionTransforms(vts []config.VersionTransform) ([]CompiledVersionTransform, error) {
+	out := make([]CompiledVersionTransform, 0, len(vts))
+	for _, t := range vts {
+		re, err := regexp.Compile(t.Match)
+		if err != nil {
+			return nil, fmt.Errorf("invalid version transform regex %q: %w", t.Match, err)
+		}
+		out = append(out, CompiledVersionTransform{
+			Re:      re,
+			Replace: t.Replace,
+		})
+	}
+	return out, nil
+}
+
+func applyCompiledVersionTransforms(version string, transforms []CompiledVersionTransform) string {
+	for _, t := range transforms {
+		version = t.Re.ReplaceAllString(version, t.Replace)
 	}
 	return version
 }
 
-func compareVersions(currentStr, latestStr string) int {
+func compareVersions(logger *slog.Logger, currentStr, latestStr string) int {
 	current, err := apk.ParseVersion(currentStr)
 	if err != nil {
-		log.Printf("WARNING: failed to parse current version %q: %v", currentStr, err)
+		logger.Warn("failed to parse current version", "version", currentStr, "error", err)
 		return -1
 	}
 
 	latest, err := apk.ParseVersion(latestStr)
 	if err != nil {
-		log.Printf("WARNING: failed to parse latest version %q: %v", latestStr, err)
+		logger.Warn("failed to parse latest version", "version", latestStr, "error", err)
 		return 1
 	}
 	return apk.CompareVersions(current, latest)
 }
 
-func writeOutput(newVersion, packageName string) {
+func writeOutput(logger *slog.Logger, newVersion, packageName string) error {
 	outputFile := os.Getenv("GITHUB_OUTPUT")
 	if outputFile == "" {
-		log.Println("WARNING: GITHUB_OUTPUT not set, skip writing outputs")
-		return
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			return fmt.Errorf("GITHUB_OUTPUT environment variable not set")
+		}
+
+		logger.Info("would write to GITHUB_OUTPUT (running locally)",
+			"package_version", newVersion,
+			"package_name", packageName)
+		return nil
 	}
 
 	f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		log.Fatalf("ERROR: failed to open GITHUB_OUTPUT file: %v", err)
+		return fmt.Errorf("failed to open GITHUB_OUTPUT file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			logger.Warn("failed to close GITHUB_OUTPUT file", "error", cerr)
+		}
+	}()
 
 	if newVersion != "" {
-		fmt.Fprintf(f, "package_version=%s\n", newVersion)
+		if _, err := fmt.Fprintf(f, "package_version=%s\n", newVersion); err != nil {
+			return fmt.Errorf("failed to write package_version: %w", err)
+		}
 	}
 	if packageName != "" {
-		fmt.Fprintf(f, "package_name=%s\n", packageName)
+		if _, err := fmt.Fprintf(f, "package_name=%s\n", packageName); err != nil {
+			return fmt.Errorf("failed to write package_name: %w", err)
+		}
 	}
+
+	logger.Debug("wrote outputs to GITHUB_OUTPUT",
+		"package_version", newVersion,
+		"package_name", packageName)
+
+	return nil
 }
 
-func runMelangeCommand(filePath, versionToUse, commitHash string) {
-
-	args := []string{"bump", filePath, versionToUse}
-	if commitHash != "" {
-		args = append(args, "--expected-commit="+commitHash)
-	}
-
-	log.Printf("INFO: executing command melange %s\n", strings.Join(args, " "))
-	cmd := exec.Command("melange", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("ERROR: unable to execute melange bump command: %v", err)
-	}
-}
-
-func main() {
-	if len(os.Args) < 2 {
-		log.Fatal("ERROR: please provide a valid Melange config file path")
-	}
-	filePath := os.Args[1]
-	data, err := os.ReadFile(filePath)
+func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit string) error {
+	rc, err := renovate.New(renovate.WithConfig(configPath))
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("creating renovate client: %w", err)
 	}
 
-	var config Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		log.Fatalf("ERROR: failed to unmarshal Melange yaml config: %v", err)
+	ren := bump.New(ctx,
+		bump.WithTargetVersion(newVersion),
+		bump.WithExpectedCommit(expectedCommit),
+	)
+
+	if err := rc.Renovate(ctx, ren); err != nil {
+		return fmt.Errorf("renovating config: %w", err)
 	}
 
-	if !config.Update.Enabled {
-		log.Printf("WARNING: Updates are disabled for package %s, skipping.", config.Package.Name)
-		return
+	return nil
+}
+
+func run(ctx context.Context, logger *slog.Logger, filePath string) error {
+	cfg, err := config.ParseConfiguration(ctx, filePath)
+	if err != nil {
+		return fmt.Errorf("parsing configuration: %w", err)
+	}
+
+	if !cfg.Update.Enabled {
+		logger.Info("updates disabled, skipping", "package", cfg.Package.Name)
+		return nil
+	}
+
+	compiledTransforms, err := compileVersionTransforms(cfg.Update.VersionTransform)
+	if err != nil {
+		return fmt.Errorf("compiling version transforms: %w", err)
 	}
 
 	var versionResult VersionResult
-	if config.Update.GitHub != nil {
-		versionResult, err = getLatestGitHubVersion(&config.Update)
-	} else if config.Update.ReleaseMonitor != nil {
-		versionResult, err = getLatestReleaseMonitorVersion(&config.Update)
+	if cfg.Update.GitHubMonitor != nil {
+		versionResult, err = getLatestGitHubVersion(ctx, logger, cfg)
+	} else if cfg.Update.ReleaseMonitor != nil {
+		versionResult, err = getLatestReleaseMonitorVersion(ctx, logger, cfg)
+	} else if cfg.Update.GitMonitor != nil {
+		versionResult, err = getLatestGitVersion(ctx, logger, cfg)
 	} else {
-		log.Fatal("ERROR: update provider not configured")
+		return fmt.Errorf("update provider not implemented")
 	}
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("fetching latest version: %w", err)
 	}
 
-	versionToUse := applyVersionTransforms(versionResult.Processed, config.Update.VersionTransforms)
+	versionToUse := applyCompiledVersionTransforms(versionResult.Version, compiledTransforms)
 
-	if compareVersions(config.Package.Version, versionToUse) >= 0 {
-		log.Printf("INFO: package version already up to date.")
-		return
+	if compareVersions(logger, cfg.Package.Version, versionToUse) >= 0 {
+		logger.Info("package version already up to date",
+			"current", cfg.Package.Version,
+			"latest", versionToUse)
+		return nil
 	}
 
-	runMelangeCommand(filePath, versionToUse, versionResult.CommitSHA)
-	writeOutput(versionToUse, config.Package.Name)
+	logger.Info("updating package",
+		"package", cfg.Package.Name,
+		"from", cfg.Package.Version,
+		"to", versionToUse)
+
+	if err := bumpConfig(ctx, filePath, versionToUse, versionResult.CommitSHA); err != nil {
+		return fmt.Errorf("bumping config: %w", err)
+	}
+
+	if err := writeOutput(logger, versionToUse, cfg.Package.Name); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+
+	logger.Info("successfully updated package",
+		"package", cfg.Package.Name,
+		"version", versionToUse)
+
+	return nil
+}
+
+func main() {
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})
+	logger := slog.New(handler)
+
+	slog.SetDefault(logger)
+
+	if len(os.Args) < 2 {
+		logger.Error("missing argument", "error", "please provide a valid Melange config file path")
+		os.Exit(1)
+	}
+	filePath := os.Args[1]
+
+	ctx := context.Background()
+	if err := run(ctx, logger, filePath); err != nil {
+		logger.Error("fatal error", "error", err)
+		os.Exit(1)
+	}
 }
